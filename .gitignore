@@ -1,0 +1,19 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# 大型数据文件（不上传到 Git）
+data/*.dta
+processed_data/*.csv
+results/regression_dataset.csv
+
+# IDE
+.idea/
+.vscode/
+*.swp
