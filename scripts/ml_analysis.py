@@ -571,22 +571,22 @@ def main():
     print("#" * 70)
 
     # 1. Lasso 变量筛选
-    retained_vars = lasso_analysis(X, y, feature_names, output_dir)
+    lasso_analysis(X, y, feature_names, output_dir)
 
     # 2. 随机森林
-    rf_reg, rf_clf, rf_importance = random_forest_analysis(X, y, y_class, feature_names, output_dir)
+    random_forest_analysis(X, y, y_class, feature_names, output_dir)
 
     # 3. XGBoost + SHAP
-    xgb_model, shap_importance = xgboost_shap_analysis(X, y, feature_names, output_dir)
+    xgboost_shap_analysis(X, y, feature_names, output_dir)
 
     # 4. 决策树
-    dt_model = decision_tree_analysis(X, y_class, feature_names, output_dir)
+    decision_tree_analysis(X, y_class, feature_names, output_dir)
 
     # 5. K-Means 聚类
-    km_model, df_clustered = kmeans_analysis(df_ml, feature_names, output_dir)
+    kmeans_analysis(df_ml, feature_names, output_dir)
 
     # 6. 模型对比
-    comparison = model_comparison(X, y, y_class, feature_names, output_dir)
+    model_comparison(X, y, y_class, feature_names, output_dir)
 
     # 最终总结
     print("\n" + "=" * 70)
@@ -598,10 +598,8 @@ def main():
             size = os.path.getsize(os.path.join(output_dir, f)) / 1024
             print(f"  📊 {f}  ({size:.0f} KB)")
 
-    print(f"\n数据文件:")
+    print(f"\n本脚本产出数据文件:")
     print(f"  📄 model_comparison.csv")
-    print(f"  📄 regression_dataset.csv")
-    print(f"  📄 regression_tables.txt")
 
 
 if __name__ == "__main__":

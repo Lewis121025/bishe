@@ -25,6 +25,41 @@ from sklearn.decomposition import PCA
 
 warnings.filterwarnings('ignore')
 
+# 行业管制口径（参考文献常见口径并结合现有行业编码字母）
+# B: 采矿业, D: 电力热力燃气及水生产和供应业, G: 交通运输仓储和邮政业
+# I: 信息传输软件和信息技术服务业, N: 水利环境和公共设施管理业
+REGULATED_INDUSTRY_SECTORS = {"B", "D", "G", "I", "N"}
+
+# 实控人性质代码口径（用于央企/地方国企分组）
+# 2100: 中央国有企业
+# 2120: 地方国有企业
+# 注：其余国有相关代码（如 1100）含义在样本中存在混合，不强行归类以避免误分。
+CENTRAL_CONTROLLER_CODES = {"2100"}
+LOCAL_CONTROLLER_CODES = {"2120"}
+
+
+def _assert_not_lfs_pointer(file_path):
+    """若文件仍是 Git LFS 指针，给出明确报错，避免后续读数失败。"""
+    with open(file_path, "rb") as f:
+        first_line = f.readline().decode("utf-8", errors="ignore").strip()
+    if first_line.startswith("version https://git-lfs.github.com/spec/v1"):
+        raise RuntimeError(
+            f"检测到 Git LFS 指针文件: {file_path}\n"
+            "请先执行 `git lfs install && git lfs pull` 拉取真实数据后再运行。"
+        )
+
+
+def _controller_first_code(value):
+    """提取 ActualControllerNatureID 的首个代码。"""
+    if pd.isna(value):
+        return np.nan
+    code = str(value).strip().split(",")[0].strip()
+    if code in {"", "nan", "None"}:
+        return np.nan
+    if code.endswith(".0"):
+        code = code[:-2]
+    return code
+
 # ============================================================
 # 第一部分：数据加载与清洗
 # ============================================================
@@ -37,11 +72,9 @@ def load_and_clean_data(data_dir):
 
     # --- 1. 财务数据 (营业收入, 净利润, 总资产, 无形资产, 行业) ---
     print("\n[1/8] 加载财务数据...")
-    df_fin = pd.read_csv(os.path.join(data_dir, "营业收入+净利润+总资产+无形资产+行业变量.csv"))
-    # id 是数字编号，需要找到真正的股票代码
-    # 这里 id 实际上不是股票代码，而是公司编号。需要检查
-    # 从其他文件（如所在地）可以看到 Symbol 是 000001 格式
-    # 营业收入文件中 id=1 对应 Symbol=000001
+    fin_path = os.path.join(data_dir, "营业收入+净利润+总资产+无形资产+行业变量.csv")
+    _assert_not_lfs_pointer(fin_path)
+    df_fin = pd.read_csv(fin_path)
     df_fin.rename(columns={"id": "Symbol", "OperatingEvenue": "Revenue"}, inplace=True)
     df_fin["Symbol"] = df_fin["Symbol"].apply(lambda x: f"{int(x):06d}")
     df_fin["Year"] = df_fin["year"]
@@ -51,7 +84,9 @@ def load_and_clean_data(data_dir):
 
     # --- 2. 两职合一 + 管理层持股 + 董事会规模 + 独董比例 ---
     print("[2/8] 加载公司治理数据...")
-    df_gov = pd.read_csv(os.path.join(data_dir, "两职合一+管理层持股比例+董事会规模+独立董事占比.csv"))
+    gov_path = os.path.join(data_dir, "两职合一+管理层持股比例+董事会规模+独立董事占比.csv")
+    _assert_not_lfs_pointer(gov_path)
+    df_gov = pd.read_csv(gov_path)
     df_gov["Symbol"] = df_gov["Symbol"].apply(lambda x: f"{int(x):06d}")
     df_gov["Year"] = pd.to_datetime(df_gov["Enddate"]).dt.year
     # 去重，保留每个公司每年最后一条记录
@@ -62,7 +97,9 @@ def load_and_clean_data(data_dir):
 
     # --- 3. 总负债 ---
     print("[3/8] 加载负债数据...")
-    df_debt = pd.read_csv(os.path.join(data_dir, "总负债.csv"))
+    debt_path = os.path.join(data_dir, "总负债.csv")
+    _assert_not_lfs_pointer(debt_path)
+    df_debt = pd.read_csv(debt_path)
     df_debt["Symbol"] = df_debt["Symbol"].apply(lambda x: f"{int(x):06d}")
     df_debt["Year"] = pd.to_datetime(df_debt["EndDate"]).dt.year
     df_debt = df_debt.groupby(["Symbol", "Year"])["TotalLiability"].last().reset_index()
@@ -70,7 +107,9 @@ def load_and_clean_data(data_dir):
 
     # --- 4. 高管前三名薪酬总合 ---
     print("[4/8] 加载薪酬数据...")
-    df_pay = pd.read_csv(os.path.join(data_dir, "高管前三名薪酬总合.csv"))
+    pay_path = os.path.join(data_dir, "高管前三名薪酬总合.csv")
+    _assert_not_lfs_pointer(pay_path)
+    df_pay = pd.read_csv(pay_path)
     df_pay["Symbol"] = df_pay["Symbol"].apply(lambda x: f"{int(x):06d}")
     df_pay["Year"] = pd.to_datetime(df_pay["Enddate"]).dt.year
     # StatisticalCaliber 1和2 的值相同，取其一即可
@@ -82,7 +121,9 @@ def load_and_clean_data(data_dir):
 
     # --- 5. 所在地 + 公司性质 ---
     print("[5/8] 加载企业性质与所在地数据...")
-    df_loc = pd.read_csv(os.path.join(data_dir, "所在地+公司性质.csv"))
+    loc_path = os.path.join(data_dir, "所在地+公司性质.csv")
+    _assert_not_lfs_pointer(loc_path)
+    df_loc = pd.read_csv(loc_path)
     df_loc["Symbol"] = df_loc["Symbol"].apply(lambda x: f"{int(x):06d}")
     df_loc["Year"] = pd.to_datetime(df_loc["EndDate"]).dt.year
     df_loc = df_loc.sort_values("EndDate").groupby(["Symbol", "Year"]).last().reset_index()
@@ -91,7 +132,9 @@ def load_and_clean_data(data_dir):
 
     # --- 6. 第一大股东持股比例 + 实际控制人股权性质 ---
     print("[6/8] 加载股东数据...")
-    df_holder = pd.read_csv(os.path.join(data_dir, "第一大股东持股比例+实际控制人股权性质.csv"))
+    holder_path = os.path.join(data_dir, "第一大股东持股比例+实际控制人股权性质.csv")
+    _assert_not_lfs_pointer(holder_path)
+    df_holder = pd.read_csv(holder_path)
     df_holder["Symbol"] = df_holder["Symbol"].apply(lambda x: f"{int(x):06d}")
     df_holder["Year"] = pd.to_datetime(df_holder["EndDate"]).dt.year
     df_holder = df_holder.sort_values("EndDate").groupby(["Symbol", "Year"]).last().reset_index()
@@ -100,7 +143,9 @@ def load_and_clean_data(data_dir):
 
     # --- 7. 总经理任期年限 ---
     print("[7/8] 加载总经理任期数据...")
-    df_tenure = pd.read_csv(os.path.join(data_dir, "总经理任期年限.csv"))
+    tenure_path = os.path.join(data_dir, "总经理任期年限.csv")
+    _assert_not_lfs_pointer(tenure_path)
+    df_tenure = pd.read_csv(tenure_path)
     df_tenure.rename(columns={"Stkcd": "Symbol"}, inplace=True)
     df_tenure["Symbol"] = df_tenure["Symbol"].apply(lambda x: f"{int(x):06d}")
     df_tenure["Year"] = pd.to_datetime(df_tenure["Reptdt"]).dt.year
@@ -115,7 +160,9 @@ def load_and_clean_data(data_dir):
 
     # --- 8. 政府补助 ---
     print("[8/8] 加载政府补助数据...")
-    df_sub = pd.read_csv(os.path.join(data_dir, "政府补助.csv"))
+    sub_path = os.path.join(data_dir, "政府补助.csv")
+    _assert_not_lfs_pointer(sub_path)
+    df_sub = pd.read_csv(sub_path)
     df_sub.rename(columns={"Stkcd": "Symbol", "Fn05602": "SubsidyAmount"}, inplace=True)
     df_sub["Symbol"] = df_sub["Symbol"].apply(lambda x: f"{int(x):06d}")
     df_sub["Year"] = pd.to_datetime(df_sub["Accper"]).dt.year
@@ -159,8 +206,13 @@ def construct_variables(df):
 
     # 2. 解释变量：政府补助对数
     print("2. 构造 lnSubsidy = ln(政府补助)")
-    # 政府补助为0或负的处理：取正值后取对数
-    df["lnSubsidy"] = np.log(df["SubsidyAmount"].clip(lower=1))
+    # 基准口径：仅对正补助取对数，非正值置为缺失（避免将负值机械截断为1）
+    positive_subsidy = df["SubsidyAmount"].where(df["SubsidyAmount"] > 0)
+    df["lnSubsidy"] = np.log(positive_subsidy)
+    # 备选口径：ln(1+补助)，用于稳健性检验
+    df["lnSubsidy1p"] = np.log1p(df["SubsidyAmount"].clip(lower=0))
+    non_positive_n = int((df["SubsidyAmount"] <= 0).fillna(False).sum())
+    print(f"   非正补助样本（lnSubsidy 置缺失）: {non_positive_n}")
 
     # 3. 控制变量
     print("3. 构造控制变量...")
@@ -214,7 +266,9 @@ def construct_variables(df):
     df["IndustrySector"] = df["IndustryCode1"].str[0]
     # 同时保留制造业二分变量，用于简单描述
     df["Industry"] = (df["IndustrySector"] == "C").astype(int)
+    df["RegulatedIndustry"] = df["IndustrySector"].isin(REGULATED_INDUSTRY_SECTORS).astype(int)
     print(f"   行业大类分布:\n{df['IndustrySector'].value_counts().to_string()}")
+    print(f"   管制行业样本占比: {df['RegulatedIndustry'].mean():.2%}")
 
     # 6. 管理层权力指标
     print("6. 构造管理层权力各分指标...")
@@ -249,6 +303,21 @@ def construct_variables(df):
     df["IsSOE"] = np.where(df["OwnerType"] == "国有", 1,
                            np.where(df["OwnerType"] == "非国有", 0, np.nan))
     print(f"   企业性质分布:\n{df['OwnerType'].value_counts(dropna=False).to_string()}")
+
+    # 8. 央企/地方国企识别（仅在国有样本内）
+    print("8. 构造央企/地方国企分组...")
+    df["ControllerCode"] = df["ActualControllerNatureID"].apply(_controller_first_code)
+    df["IsCentralSOE"] = np.where(
+        (df["IsSOE"] == 1) & (df["ControllerCode"].isin(CENTRAL_CONTROLLER_CODES)),
+        1,
+        np.where(
+            (df["IsSOE"] == 1) & (df["ControllerCode"].isin(LOCAL_CONTROLLER_CODES)),
+            0,
+            np.nan,
+        ),
+    )
+    df["SOELevel"] = df["IsCentralSOE"].map({1.0: "央企", 0.0: "地方国企"})
+    print(f"   央地分组（仅国有内识别）:\n{df['SOELevel'].value_counts(dropna=False).to_string()}")
 
     print(f"\n变量构造完成。当前列: {list(df.columns)}")
     return df
@@ -470,6 +539,62 @@ def _print_core_results(model, core_vars, n_ind, n_year, sample_size, n_clusters
     print(f"R² = {model.rsquared:.4f}")
 
 
+def _fit_model3_and_4(df_sub, control_vars):
+    """在给定子样本上拟合模型3和模型4。"""
+    core3 = ["lnSubsidy"] + control_vars
+    core4 = ["lnSubsidy", "Power"] + control_vars
+
+    sub3 = df_sub.dropna(subset=core3 + ["Overpay", "IndustrySector"]).copy()
+    sub4 = df_sub.dropna(subset=core4 + ["Overpay", "IndustrySector"]).copy()
+
+    if len(sub3) < 80 or len(sub4) < 80:
+        return None
+
+    x3, n_ind3, n_year3 = _build_fe_matrix(sub3, core3)
+    y3 = sub3["Overpay"]
+    m3 = _fit_with_cluster_se(y3, x3, sub3["Symbol"])
+
+    x4, n_ind4, n_year4 = _build_fe_matrix(sub4, core4)
+    y4 = sub4["Overpay"]
+    m4 = _fit_with_cluster_se(y4, x4, sub4["Symbol"])
+
+    return {
+        "m3": m3,
+        "m4": m4,
+        "n3": len(sub3),
+        "n4": len(sub4),
+        "ind3": n_ind3,
+        "year3": n_year3,
+        "ind4": n_ind4,
+        "year4": n_year4,
+        "cl3": sub3["Symbol"].nunique(),
+        "cl4": sub4["Symbol"].nunique(),
+    }
+
+
+def _print_subsample_model34(label, fit_result):
+    """打印子样本的模型3/4核心结果。"""
+    m3 = fit_result["m3"]
+    m4 = fit_result["m4"]
+    print(f"\n{'=' * 40}")
+    print(f"子样本: {label}")
+    print(f"{'=' * 40}")
+    print(
+        f"模型3 N={fit_result['n3']} (聚类={fit_result['cl3']}), "
+        f"模型4 N={fit_result['n4']} (聚类={fit_result['cl4']})"
+    )
+    print(
+        f"模型3 lnSubsidy={m3.params.get('lnSubsidy', np.nan):.4f} "
+        f"(p={m3.pvalues.get('lnSubsidy', np.nan):.4f}), R²={m3.rsquared:.4f}"
+    )
+    print(
+        f"模型4 lnSubsidy={m4.params.get('lnSubsidy', np.nan):.4f} "
+        f"(p={m4.pvalues.get('lnSubsidy', np.nan):.4f}), "
+        f"Power={m4.params.get('Power', np.nan):.4f} "
+        f"(p={m4.pvalues.get('Power', np.nan):.4f}), R²={m4.rsquared:.4f}"
+    )
+
+
 def run_regressions(df):
     """
     模型3: Overpay = α₀ + α₁·lnSubsidy + 控制 + ΣIndustry + ΣYear + ε
@@ -586,50 +711,61 @@ def heterogeneity_analysis(df):
     print("=" * 70)
 
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
-    core_vars_no_power = ["lnSubsidy"] + control_vars
-    core_vars_with_power = ["lnSubsidy", "Power"] + control_vars
 
     for label, mask_val in [("国有企业", 1), ("非国有企业", 0)]:
-        print(f"\n{'='*40}")
-        print(f"子样本: {label}")
-        print(f"{'='*40}")
-
         df_sub = df[df["IsSOE"] == mask_val].copy()
-        df_sub = df_sub.dropna(subset=core_vars_with_power + ["Overpay", "IndustrySector"])
-
-        if len(df_sub) < 50:
+        fit_result = _fit_model3_and_4(df_sub, control_vars)
+        if fit_result is None:
             print(f"  样本量不足 ({len(df_sub)})，跳过。")
             continue
+        _print_subsample_model34(label, fit_result)
 
-        # 模型3 (无 Power) + 行业/年份FE
-        X3, n_ind3, n_year3 = _build_fe_matrix(df_sub, core_vars_no_power)
-        y3 = df_sub["Overpay"]
-        m3 = _fit_with_cluster_se(y3, X3, df_sub["Symbol"])
 
-        # 模型4 (有 Power) + 行业/年份FE
-        X4, n_ind4, n_year4 = _build_fe_matrix(df_sub, core_vars_with_power)
-        y4 = df_sub["Overpay"]
-        m4 = _fit_with_cluster_se(y4, X4, df_sub["Symbol"])
+def mechanism_analysis(df):
+    """
+    机制检验：
+    1) 管制行业 vs 非管制行业
+    2) 央企 vs 地方国企（仅在可识别国有样本中）
+    """
+    print("\n" + "=" * 70)
+    print("第八部分：机制检验 — 行业管制与央地国企")
+    print("=" * 70)
 
-        print(f"\n  样本量: {len(df_sub)}")
-        print(f"  行业FE: {n_ind3} 个 | 年份FE: {n_year3} 个")
-        print(f"\n  模型3 (无Power):")
-        print(f"    lnSubsidy: {m3.params['lnSubsidy']:.4f} (p={m3.pvalues['lnSubsidy']:.4f})")
-        print(f"    R² = {m3.rsquared:.4f}")
-        print(f"\n  模型4 (有Power):")
-        print(f"    lnSubsidy: {m4.params['lnSubsidy']:.4f} (p={m4.pvalues['lnSubsidy']:.4f})")
-        print(f"    Power:     {m4.params['Power']:.4f} (p={m4.pvalues['Power']:.4f})")
-        print(f"    R² = {m4.rsquared:.4f}")
+    control_vars = ["Roa", "Lever", "Top1", "Zone"]
+
+    # ---- A. 管制行业 vs 非管制行业 ----
+    print("\n[机制A] 管制行业 vs 非管制行业")
+    for label, value in [("管制行业", 1), ("非管制行业", 0)]:
+        df_sub = df[df["RegulatedIndustry"] == value].copy()
+        fit_result = _fit_model3_and_4(df_sub, control_vars)
+        if fit_result is None:
+            print(f"  {label}样本不足，跳过。")
+            continue
+        _print_subsample_model34(label, fit_result)
+
+    # ---- B. 央企 vs 地方国企 ----
+    print("\n[机制B] 央企 vs 地方国企（国有样本）")
+    soe_df = df[df["IsSOE"] == 1].copy()
+    identified_ratio = soe_df["IsCentralSOE"].notna().mean() if len(soe_df) > 0 else np.nan
+    print(f"可识别央地属性比例: {identified_ratio:.2%}")
+
+    for label, value in [("央企", 1), ("地方国企", 0)]:
+        df_sub = soe_df[soe_df["IsCentralSOE"] == value].copy()
+        fit_result = _fit_model3_and_4(df_sub, control_vars)
+        if fit_result is None:
+            print(f"  {label}样本不足，跳过。")
+            continue
+        _print_subsample_model34(label, fit_result)
 
 
 # ============================================================
-# 第八部分：相关性分析
+# 第九部分：相关性分析
 # ============================================================
 
 def correlation_analysis(df):
     """Pearson 相关系数矩阵"""
     print("\n" + "=" * 70)
-    print("第八部分：主要变量相关系数矩阵")
+    print("第九部分：主要变量相关系数矩阵")
     print("=" * 70)
 
     corr_vars = ["Overpay", "lnSubsidy", "Power", "Roa", "Lever", "Top1", "Zone", "Industry"]
@@ -678,9 +814,9 @@ def vif_diagnostics(df):
 # ============================================================
 
 def robustness_checks(df):
-    """稳健性检验：(1)替换被解释变量 (2)子样本检验 (3)滞后变量"""
+    """稳健性检验：替换变量、样本期缩减、极值处理、行业子样本、滞后项。"""
     print("\n" + "=" * 70)
-    print("稳健性检验")
+    print("第十部分：稳健性检验")
     print("=" * 70)
 
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
@@ -738,6 +874,34 @@ def robustness_checks(df):
         print(f"    N={len(df_r4)}, 聚类={df_r4['Symbol'].nunique()}个")
         print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
 
+    # --- 稳健性5：替换核心解释变量为 ln(1+补助) ---
+    print("\n  [稳健性5] 替换解释变量: 使用 lnSubsidy1p")
+    core_vars_alt = ["lnSubsidy1p"] + control_vars
+    df_r5 = df.dropna(subset=core_vars_alt + ["Overpay", "IndustrySector"]).copy()
+    if len(df_r5) > 100:
+        X_r5, _, _ = _build_fe_matrix(df_r5, core_vars_alt)
+        m_r5 = _fit_with_cluster_se(df_r5["Overpay"], X_r5, df_r5["Symbol"])
+        coef = m_r5.params.get("lnSubsidy1p", np.nan)
+        pval = m_r5.pvalues.get("lnSubsidy1p", np.nan)
+        print(f"    lnSubsidy1p 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r5.rsquared:.4f}")
+        print(f"    N={len(df_r5)}, 聚类={df_r5['Symbol'].nunique()}个")
+        print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
+
+    # --- 稳健性6：滞后一期政府补助 ---
+    print("\n  [稳健性6] 使用滞后一期补助变量 lnSubsidy_l1")
+    df_lag = df.sort_values(["Symbol", "Year"]).copy()
+    df_lag["lnSubsidy_l1"] = df_lag.groupby("Symbol")["lnSubsidy"].shift(1)
+    core_vars_lag = ["lnSubsidy_l1"] + control_vars
+    df_r6 = df_lag.dropna(subset=core_vars_lag + ["Overpay", "IndustrySector"]).copy()
+    if len(df_r6) > 100:
+        X_r6, _, _ = _build_fe_matrix(df_r6, core_vars_lag)
+        m_r6 = _fit_with_cluster_se(df_r6["Overpay"], X_r6, df_r6["Symbol"])
+        coef = m_r6.params.get("lnSubsidy_l1", np.nan)
+        pval = m_r6.pvalues.get("lnSubsidy_l1", np.nan)
+        print(f"    lnSubsidy_l1 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r6.rsquared:.4f}")
+        print(f"    N={len(df_r6)}, 聚类={df_r6['Symbol'].nunique()}个")
+        print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
+
 
 # ============================================================
 # 主流程
@@ -764,19 +928,22 @@ def main():
     # 5. 计算管理层权力
     df = compute_power(df)
 
-    # 6. VIF 多重共线性检验
-    vif_diagnostics(df)
-
-    # 7. 相关性分析
-    correlation_analysis(df)
-
-    # 8. 回归分析 (含 Sobel 中介效应检验)
+    # 6. 回归分析 (含 Sobel 中介效应检验)
     model3, model4, model5 = run_regressions(df)
 
-    # 9. 异质性分析
+    # 7. 异质性分析（分产权）
     heterogeneity_analysis(df)
 
-    # 10. 稳健性检验
+    # 8. 机制检验（管制/非管制、央企/地方国企）
+    mechanism_analysis(df)
+
+    # 9. 相关性分析
+    correlation_analysis(df)
+
+    # 10. VIF 多重共线性检验
+    vif_diagnostics(df)
+
+    # 11. 稳健性检验
     robustness_checks(df)
 
     # 保存最终数据集
