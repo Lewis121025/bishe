@@ -540,35 +540,40 @@ def _print_core_results(model, core_vars, n_ind, n_year, sample_size, n_clusters
 
 
 def _fit_model3_and_4(df_sub, control_vars):
-    """在给定子样本上拟合模型3和模型4。"""
+    """在给定子样本上拟合模型3和模型4（统一样本）。"""
     core3 = ["lnSubsidy"] + control_vars
     core4 = ["lnSubsidy", "Power"] + control_vars
 
-    sub3 = df_sub.dropna(subset=core3 + ["Overpay", "IndustrySector"]).copy()
-    sub4 = df_sub.dropna(subset=core4 + ["Overpay", "IndustrySector"]).copy()
+    # 统一样本：取模型4所需的全部变量（是模型3的超集）
+    unified = df_sub.dropna(subset=core4 + ["Overpay", "IndustrySector"]).copy()
 
-    if len(sub3) < 80 or len(sub4) < 80:
+    if len(unified) < 80:
         return None
 
-    x3, n_ind3, n_year3 = _build_fe_matrix(sub3, core3)
-    y3 = sub3["Overpay"]
-    m3 = _fit_with_cluster_se(y3, x3, sub3["Symbol"])
+    groups = unified["Symbol"]
 
-    x4, n_ind4, n_year4 = _build_fe_matrix(sub4, core4)
-    y4 = sub4["Overpay"]
-    m4 = _fit_with_cluster_se(y4, x4, sub4["Symbol"])
+    x3, n_ind3, n_year3 = _build_fe_matrix(unified, core3)
+    y3 = unified["Overpay"]
+    m3 = _fit_with_cluster_se(y3, x3, groups)
+
+    x4, n_ind4, n_year4 = _build_fe_matrix(unified, core4)
+    y4 = unified["Overpay"]
+    m4 = _fit_with_cluster_se(y4, x4, groups)
+
+    n_unified = len(unified)
+    n_cl = groups.nunique()
 
     return {
         "m3": m3,
         "m4": m4,
-        "n3": len(sub3),
-        "n4": len(sub4),
+        "n3": n_unified,
+        "n4": n_unified,
         "ind3": n_ind3,
         "year3": n_year3,
         "ind4": n_ind4,
         "year4": n_year4,
-        "cl3": sub3["Symbol"].nunique(),
-        "cl4": sub4["Symbol"].nunique(),
+        "cl3": n_cl,
+        "cl4": n_cl,
     }
 
 
@@ -600,6 +605,8 @@ def run_regressions(df):
     模型3: Overpay = α₀ + α₁·lnSubsidy + 控制 + ΣIndustry + ΣYear + ε
     模型4: Overpay = α₀ + α₁·lnSubsidy + α₂·Power + 控制 + ΣIndustry + ΣYear + ε
     模型5: Power   = α₀ + α₁·lnSubsidy + 控制 + ΣIndustry + ΣYear + ε
+
+    注意：三个模型使用 **同一批样本** 以确保中介效应系数对比有效。
     """
     print("\n" + "=" * 70)
     print("第六部分：回归分析（含行业 & 年份固定效应）")
@@ -607,19 +614,28 @@ def run_regressions(df):
 
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
 
+    # ============================================================
+    # 统一样本：取模型3/4/5所需全部变量的交集
+    # 这样三个模型在完全相同的 N 上回归，系数可直接对比
+    # ============================================================
+    all_needed = ["lnSubsidy", "Power"] + control_vars + ["Overpay", "IndustrySector"]
+    df_unified = df.dropna(subset=all_needed).copy()
+    print(f"\n统一样本量（模型3/4/5共用）: N = {len(df_unified)}")
+    print(f"  聚类数（公司数）: {df_unified['Symbol'].nunique()}")
+
+    groups = df_unified["Symbol"]
+
     # ---- 模型3：基准回归 ----
     print("\n" + "-" * 50)
     print("模型3: Overpay = f(lnSubsidy, Controls, ΣIndustry, ΣYear)")
     print("-" * 50)
 
     core3 = ["lnSubsidy"] + control_vars
-    df3 = df.dropna(subset=core3 + ["Overpay", "IndustrySector"]).copy()
-    X3, n_ind3, n_year3 = _build_fe_matrix(df3, core3)
-    y3 = df3["Overpay"]
-    groups3 = df3["Symbol"]
-    model3 = _fit_with_cluster_se(y3, X3, groups3)
-    n_cl3 = groups3.nunique()
-    _print_core_results(model3, core3, n_ind3, n_year3, len(df3), n_cl3)
+    X3, n_ind3, n_year3 = _build_fe_matrix(df_unified, core3)
+    y3 = df_unified["Overpay"]
+    model3 = _fit_with_cluster_se(y3, X3, groups)
+    n_cl = groups.nunique()
+    _print_core_results(model3, core3, n_ind3, n_year3, len(df_unified), n_cl)
 
     # ---- 模型4：加入管理层权力（中介效应） ----
     print("\n" + "-" * 50)
@@ -627,13 +643,10 @@ def run_regressions(df):
     print("-" * 50)
 
     core4 = ["lnSubsidy", "Power"] + control_vars
-    df4 = df.dropna(subset=core4 + ["Overpay", "IndustrySector"]).copy()
-    X4, n_ind4, n_year4 = _build_fe_matrix(df4, core4)
-    y4 = df4["Overpay"]
-    groups4 = df4["Symbol"]
-    model4 = _fit_with_cluster_se(y4, X4, groups4)
-    n_cl4 = groups4.nunique()
-    _print_core_results(model4, core4, n_ind4, n_year4, len(df4), n_cl4)
+    X4, n_ind4, n_year4 = _build_fe_matrix(df_unified, core4)
+    y4 = df_unified["Overpay"]
+    model4 = _fit_with_cluster_se(y4, X4, groups)
+    _print_core_results(model4, core4, n_ind4, n_year4, len(df_unified), n_cl)
 
     # ---- 模型5：政府补助对管理层权力 ----
     print("\n" + "-" * 50)
@@ -641,13 +654,10 @@ def run_regressions(df):
     print("-" * 50)
 
     core5 = ["lnSubsidy"] + control_vars
-    df5 = df.dropna(subset=core5 + ["Power", "IndustrySector"]).copy()
-    X5, n_ind5, n_year5 = _build_fe_matrix(df5, core5)
-    y5 = df5["Power"]
-    groups5 = df5["Symbol"]
-    model5 = _fit_with_cluster_se(y5, X5, groups5)
-    n_cl5 = groups5.nunique()
-    _print_core_results(model5, core5, n_ind5, n_year5, len(df5), n_cl5)
+    X5, n_ind5, n_year5 = _build_fe_matrix(df_unified, core5)
+    y5 = df_unified["Power"]
+    model5 = _fit_with_cluster_se(y5, X5, groups)
+    _print_core_results(model5, core5, n_ind5, n_year5, len(df_unified), n_cl)
 
     # ---- 中介效应判断 (Baron & Kenny + Sobel Test) ----
     print("\n" + "=" * 50)
