@@ -7,8 +7,8 @@
 开题报告：基于数据挖掘的上市公司财政补贴与高管超额薪酬研究
 
 研究模型：
-  模型1（期望薪酬）: lnCEOpay = α₀ + α₁·lnSale + α₂·Roa + α₃·IA + α₄·Zone + ΣIndustry + ε
-  模型2（超额薪酬）: Overpay = lnCEOpay_actual - lnCEOpay_expected
+  模型1（期望薪酬）: lnCEOpay = α₀ + α₁·lnSale + α₂·Roa + α₃·IA + α₄·Zone + ΣIndustry + ΣYear + ε
+  模型2（超额薪酬）: Overpay = lnCEOpay_actual - lnCEOpay_expected（残差经1%/99% Winsorize缩尾）
   模型3（基准回归）: Overpay = α₀ + α₁·lnSubsidy + α₂·Roa + α₃·Lever + α₄·Top1 + α₅·Zone + ΣIndustry + ΣYear + ε
   模型4（中介效应）: Overpay = α₀ + α₁·lnSubsidy + α₂·Power + α₃·Roa + α₄·Lever + α₅·Top1 + α₆·Zone + ΣIndustry + ΣYear + ε
   模型5（权力回归）: Power  = α₀ + α₁·lnSubsidy + α₂·Roa + α₃·Lever + α₄·Top1 + α₅·Zone + ΣIndustry + ΣYear + ε
@@ -218,8 +218,12 @@ def construct_variables(df):
     print("3. 构造控制变量...")
     # Roa = 净利润 / 总资产
     df["Roa"] = df["NetProfit"] / df["TotalAssets"]
-    # lnSale = ln(营业收入)
-    df["lnSale"] = np.log(df["Revenue"].clip(lower=1))
+    # lnSale = ln(营业收入)，非正值视为异常置缺失
+    positive_revenue = df["Revenue"].where(df["Revenue"] > 0)
+    df["lnSale"] = np.log(positive_revenue)
+    non_positive_rev = int((df["Revenue"] <= 0).fillna(False).sum())
+    if non_positive_rev > 0:
+        print(f"   营业收入非正值（lnSale 置缺失）: {non_positive_rev}")
     # IA = 无形资产 / 总资产
     df["IA"] = df["IntangibleAsset"] / df["TotalAssets"]
     # Lever = 总负债 / 总资产
@@ -230,7 +234,7 @@ def construct_variables(df):
     # 4. Zone 区域虚拟变量：东部=0, 中西部=1
     print("4. 构造区域变量 Zone...")
     eastern_cities = [
-        "北京市", "天津市", "上海市", "重庆市",
+        "北京市", "天津市", "上海市",  # 注：重庆属于西部地区，不纳入东部
         "石家庄市", "唐山市", "秦皇岛市", "邯郸市", "保定市", "沧州市", "廊坊市", "衡水市",  # 河北
         "沈阳市", "大连市", "鞍山市", "抚顺市", "本溪市", "丹东市", "锦州市", "营口市",  # 辽宁
         "南京市", "无锡市", "徐州市", "常州市", "苏州市", "南通市", "连云港市", "淮安市",  # 江苏
@@ -272,8 +276,19 @@ def construct_variables(df):
 
     # 6. 管理层权力指标
     print("6. 构造管理层权力各分指标...")
-    # Dual (两职合一): ConcurrentPosition (0=否, 1=是? 需要检查原始值)
-    df["Dual"] = df["ConcurrentPosition"]
+    # Dual (两职合一): ConcurrentPosition 在 CSMAR 中可能编码为 1/2 或 0/1
+    # 统一转换为 0/1 二值变量（1=兼任, 0=不兼任）
+    raw_dual = df["ConcurrentPosition"]
+    if raw_dual.dropna().isin([1, 2]).all():
+        # CSMAR 编码: 1=兼任, 2=不兼任 → 转为 1/0
+        df["Dual"] = (raw_dual == 1).astype(float)
+        df.loc[raw_dual.isna(), "Dual"] = np.nan
+        print("   Dual: 原始编码为1/2，已转换为1=兼任/0=不兼任")
+    else:
+        # 已经是 0/1 编码
+        df["Dual"] = raw_dual
+        print("   Dual: 原始编码为0/1，直接使用")
+    print(f"   Dual 分布: {df['Dual'].value_counts(dropna=False).to_dict()}")
     # Insider (内部董事比例) = 1 - 独立董事比例/100
     df["Insider"] = 1 - df["IndDirectorRatio"] / 100.0
     # Mgshder (管理层持股比例)
@@ -401,7 +416,7 @@ def get_year_dummies(df, col="Year", drop_first=True):
 
 def compute_overpay(df):
     """
-    模型1: lnCEOpay = α₀ + α₁·lnSale + α₂·Roa + α₃·IA + α₄·Zone + ΣIndustry + ε
+    模型1: lnCEOpay = α₀ + α₁·lnSale + α₂·Roa + α₃·IA + α₄·Zone + ΣIndustry + ΣYear + ε
     模型2: Overpay = lnCEOpay_actual - lnCEOpay_expected (即残差)
     """
     print("\n" + "=" * 70)
@@ -412,32 +427,41 @@ def compute_overpay(df):
     model1_vars = ["lnSale", "Roa", "IA", "Zone"]
     df_model1 = df.dropna(subset=model1_vars + ["lnCEOpay", "IndustrySector"]).copy()
 
-    # 构建 X: 核心变量 + 行业虚拟变量（ΣIndustry）
+    # 构建 X: 核心变量 + 行业虚拟变量 + 年份虚拟变量
     X = df_model1[model1_vars].copy()
     ind_dummies = get_industry_dummies(df_model1)
-    X = pd.concat([X, ind_dummies], axis=1)
+    year_dummies = get_year_dummies(df_model1)
+    X = pd.concat([X, ind_dummies, year_dummies], axis=1)
     X = sm.add_constant(X)
     y = df_model1["lnCEOpay"]
 
     print(f"\n模型1 样本量: {len(df_model1)}")
     print(f"核心自变量: {model1_vars}")
     print(f"行业虚拟变量: {len(ind_dummies.columns)} 个")
+    print(f"年份虚拟变量: {len(year_dummies.columns)} 个")
 
     # OLS 回归
     model1 = sm.OLS(y, X).fit()
     print("\n" + "-" * 50)
     print("模型1 回归结果 (期望薪酬模型) — 仅展示核心变量")
     print("-" * 50)
-    # 只打印核心变量系数，行业dummy太多不全部展示
+    # 只打印核心变量系数，行业/年份dummy太多不全部展示
     core_result = model1.summary2().tables[1]
     core_rows = ["const"] + model1_vars
     core_result_filtered = core_result.loc[core_result.index.isin(core_rows)]
     print(core_result_filtered.to_string())
     print(f"行业固定效应: 已控制 ({len(ind_dummies.columns)} 个行业虚拟变量)")
+    print(f"年份固定效应: 已控制 ({len(year_dummies.columns)} 个年份虚拟变量)")
     print(f"\nR² = {model1.rsquared:.4f}, Adj-R² = {model1.rsquared_adj:.4f}")
 
     # 残差 = 超额薪酬
     df_model1["Overpay"] = model1.resid
+
+    # 对 Overpay 做 1%/99% Winsorize 缩尾（学术惯例，防止残差极端值影响后续回归）
+    ov_lower = df_model1["Overpay"].quantile(0.01)
+    ov_upper = df_model1["Overpay"].quantile(0.99)
+    df_model1["Overpay"] = df_model1["Overpay"].clip(ov_lower, ov_upper)
+    print(f"\nOverpay Winsorize 缩尾: [{ov_lower:.4f}, {ov_upper:.4f}]")
 
     # 将 Overpay 合并回主数据
     df = df.merge(df_model1[["Symbol", "Year", "Overpay"]],
