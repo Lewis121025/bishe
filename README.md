@@ -2,7 +2,7 @@
 
 ## 完整文档
 
-- 项目完整文档：`/Users/lewis/毕业论文/项目完整文档.md`
+- 项目完整文档：`项目完整文档.md`
 
 ## 项目简介
 
@@ -39,9 +39,11 @@
 │   └── ml_analysis.py              # Step 5: 数据挖掘分析
 │
 ├── results/                        # 分析结果
-│   ├── regression_tables.txt       # 论文格式回归结果表
+│   ├── regression_tables.txt       # 论文格式回归结果表（所有数值的唯一来源）
 │   ├── regression_dataset.csv      # 含全部构造变量的最终数据集
-│   ├── 论文实证结果摘要.md          # 可直接用于论文撰写的结果摘要
+│   ├── 数据分析部分_整理.md        # 论文第四、五章完整文档（最新版）
+│   ├── 论文实证结果摘要.md          # 实证结果摘要（快速查阅用）
+│   ├── 回归模型设定.md              # 模型设定与估计方法说明
 │   ├── model_comparison.csv        # ML 模型性能对比
 │   ├── fig1_lasso_path.png         # Lasso 正则化路径图
 │   ├── fig2_rf_importance.png      # 随机森林特征重要性
@@ -105,7 +107,7 @@ python scripts/ml_analysis.py
 
 | 模型 | 公式 | 用途 |
 |:---|:---|:---|
-| 模型1 | lnCEOpay = α₀ + α₁·lnSale + α₂·Roa + α₃·IA + α₄·Zone + ΣIndustry + ε | 期望薪酬（残差=超额薪酬） |
+| 模型1 | lnCEOpay = α₀ + α₁·lnSale + α₂·Roa + α₃·IA + α₄·Zone + ΣIndustry + **ΣYear** + ε | 期望薪酬（残差=Overpay，经1%/99% Winsorize） |
 | 模型3 | Overpay = α₀ + α₁·lnSubsidy + Controls + ΣIndustry + ΣYear + ε | 基准回归（检验 H1） |
 | 模型4 | Overpay = α₀ + α₁·lnSubsidy + α₂·Power + Controls + ΣIndustry + ΣYear + ε | 中介效应检验 |
 | 模型5 | Power = α₀ + α₁·lnSubsidy + Controls + ΣIndustry + ΣYear + ε | 补助→权力路径 |
