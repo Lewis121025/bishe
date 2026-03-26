@@ -13,9 +13,11 @@
 
 import os
 import sys
+import json
 import warnings
 import numpy as np
 import pandas as pd
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.getcwd(), "results", ".matplotlib"))
 import matplotlib
 matplotlib.use('Agg')  # 非交互式后端
 import matplotlib.pyplot as plt
@@ -45,7 +47,7 @@ plt.rcParams['figure.dpi'] = 150
 sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
 from regression_analysis import (load_and_clean_data, construct_variables,
                                   filter_and_describe, compute_overpay,
-                                  compute_power)
+                                  compute_power, build_analysis_dataset)
 
 
 def prepare_ml_data(df):
@@ -118,6 +120,7 @@ def lasso_analysis(X, y, feature_names, output_dir):
     removed = coefs[abs(coefs["Lasso系数"]) <= 1e-6]["变量"].tolist()
     print(f"\n  保留变量 ({len(retained)}): {retained}")
     print(f"  剔除变量 ({len(removed)}): {removed}")
+    coefs.to_csv(os.path.join(output_dir, "lasso_coefficients.csv"), index=False)
 
     # 画系数路径图
     alphas = np.logspace(-5, 0, 100)
@@ -143,7 +146,13 @@ def lasso_analysis(X, y, feature_names, output_dir):
     plt.close()
     print(f"\n  已保存: fig1_lasso_path.png")
 
-    return retained
+    return {
+        "retained": retained,
+        "removed": removed,
+        "alpha": float(lasso_cv.alpha_),
+        "fit_r2": float(lasso_cv.score(X_scaled, y)),
+        "coefficients": coefs,
+    }
 
 
 # ============================================================
@@ -208,6 +217,8 @@ def random_forest_analysis(X, y, y_class, feature_names, output_dir):
         "变量": feature_names,
         "分类重要性": rf_clf.feature_importances_
     }).sort_values("分类重要性", ascending=False)
+    importance_reg.to_csv(os.path.join(output_dir, "rf_reg_importance.csv"), index=False)
+    importance_clf.to_csv(os.path.join(output_dir, "rf_clf_importance.csv"), index=False)
 
     print("\n  特征重要性排名（随机森林回归）:")
     print("  " + "-" * 35)
@@ -236,7 +247,18 @@ def random_forest_analysis(X, y, y_class, feature_names, output_dir):
     plt.close()
     print(f"\n  已保存: fig2_rf_importance.png")
 
-    return rf_reg, rf_clf, importance_reg
+    return {
+        "rf_reg": rf_reg,
+        "rf_clf": rf_clf,
+        "importance_reg": importance_reg,
+        "importance_clf": importance_clf,
+        "r2": float(r2),
+        "rmse": float(rmse),
+        "mae": float(mae),
+        "cv_r2_mean": float(cv_scores.mean()),
+        "cv_r2_std": float(cv_scores.std()),
+        "accuracy": float(acc),
+    }
 
 
 # ============================================================
@@ -286,6 +308,7 @@ def xgboost_shap_analysis(X, y, feature_names, output_dir):
         "变量": feature_names,
         "SHAP均值": shap_importance
     }).sort_values("SHAP均值", ascending=False)
+    shap_df.to_csv(os.path.join(output_dir, "shap_importance.csv"), index=False)
 
     print("\n  SHAP 特征重要性排名:")
     print("  " + "-" * 35)
@@ -316,7 +339,14 @@ def xgboost_shap_analysis(X, y, feature_names, output_dir):
     plt.close()
     print(f"  已保存: fig4_shap_subsidy.png")
 
-    return xgb_model, shap_df
+    return {
+        "xgb_model": xgb_model,
+        "shap_df": shap_df,
+        "r2": float(r2),
+        "rmse": float(rmse),
+        "cv_r2_mean": float(cv_scores.mean()),
+        "cv_r2_std": float(cv_scores.std()),
+    }
 
 
 # ============================================================
@@ -360,7 +390,10 @@ def decision_tree_analysis(X, y_class, feature_names, output_dir):
     plt.close()
     print(f"\n  已保存: fig5_decision_tree.png")
 
-    return dt
+    return {
+        "model": dt,
+        "accuracy": float(acc),
+    }
 
 
 # ============================================================
@@ -404,6 +437,7 @@ def kmeans_analysis(df_ml, feature_names, output_dir):
     print("  " + "-" * 70)
     cluster_summary = df_cluster.groupby("Cluster")[cluster_features].mean()
     print(cluster_summary.to_string(float_format=lambda x: f"{x:.4f}"))
+    cluster_summary.to_csv(os.path.join(output_dir, "kmeans_cluster_summary.csv"))
 
     # 各类样本量和企业性质分布
     print(f"\n  各聚类样本量及国有占比:")
@@ -464,7 +498,13 @@ def kmeans_analysis(df_ml, feature_names, output_dir):
     plt.close()
     print(f"  已保存: fig7_cluster_heatmap.png")
 
-    return km_final, df_cluster
+    return {
+        "model": km_final,
+        "clustered_df": df_cluster,
+        "best_k": int(best_k),
+        "cluster_summary": cluster_summary,
+        "silhouette_scores": {int(k): float(score) for k, score in zip(K_range, sil_scores)},
+    }
 
 
 # ============================================================
@@ -557,11 +597,7 @@ def main():
 
     # 加载与准备数据（复用 regression_analysis.py 逻辑）
     print("加载数据...")
-    df = load_and_clean_data(data_dir)
-    df = construct_variables(df)
-    df = filter_and_describe(df)
-    df = compute_overpay(df)
-    df = compute_power(df)
+    df, _ = build_analysis_dataset(data_dir)
 
     # 准备 ML 数据
     df_ml, X, y, y_class, feature_names = prepare_ml_data(df)
@@ -571,22 +607,45 @@ def main():
     print("#" * 70)
 
     # 1. Lasso 变量筛选
-    lasso_analysis(X, y, feature_names, output_dir)
+    lasso_result = lasso_analysis(X, y, feature_names, output_dir)
 
     # 2. 随机森林
-    random_forest_analysis(X, y, y_class, feature_names, output_dir)
+    rf_result = random_forest_analysis(X, y, y_class, feature_names, output_dir)
 
     # 3. XGBoost + SHAP
-    xgboost_shap_analysis(X, y, feature_names, output_dir)
+    xgb_result = xgboost_shap_analysis(X, y, feature_names, output_dir)
 
     # 4. 决策树
-    decision_tree_analysis(X, y_class, feature_names, output_dir)
+    dt_result = decision_tree_analysis(X, y_class, feature_names, output_dir)
 
     # 5. K-Means 聚类
-    kmeans_analysis(df_ml, feature_names, output_dir)
+    kmeans_result = kmeans_analysis(df_ml, feature_names, output_dir)
 
     # 6. 模型对比
-    model_comparison(X, y, y_class, feature_names, output_dir)
+    comparison_df = model_comparison(X, y, y_class, feature_names, output_dir)
+
+    summary = {
+        "lasso_alpha": lasso_result["alpha"],
+        "lasso_fit_r2": lasso_result["fit_r2"],
+        "lasso_retained": lasso_result["retained"],
+        "rf_r2": rf_result["r2"],
+        "rf_rmse": rf_result["rmse"],
+        "rf_mae": rf_result["mae"],
+        "rf_cv_r2_mean": rf_result["cv_r2_mean"],
+        "rf_cv_r2_std": rf_result["cv_r2_std"],
+        "rf_accuracy": rf_result["accuracy"],
+        "rf_top_feature": rf_result["importance_reg"].iloc[0]["变量"],
+        "xgb_r2": xgb_result["r2"],
+        "xgb_rmse": xgb_result["rmse"],
+        "xgb_cv_r2_mean": xgb_result["cv_r2_mean"],
+        "xgb_cv_r2_std": xgb_result["cv_r2_std"],
+        "xgb_top_shap_feature": xgb_result["shap_df"].iloc[0]["变量"],
+        "decision_tree_accuracy": dt_result["accuracy"],
+        "kmeans_best_k": kmeans_result["best_k"],
+        "comparison": comparison_df.to_dict(orient="records"),
+    }
+    with open(os.path.join(output_dir, "ml_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
 
     # 最终总结
     print("\n" + "=" * 70)
@@ -600,6 +659,7 @@ def main():
 
     print(f"\n本脚本产出数据文件:")
     print(f"  📄 model_comparison.csv")
+    print(f"  📄 ml_summary.json")
 
 
 if __name__ == "__main__":

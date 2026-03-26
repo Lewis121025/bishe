@@ -30,11 +30,9 @@ def _set_run_font(run, font_name="Times New Roman", east_asia="宋体"):
 
 sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
 from regression_analysis import (
-    load_and_clean_data,
-    construct_variables,
-    filter_and_describe,
-    compute_overpay,
-    compute_power,
+    build_analysis_dataset,
+    run_regressions,
+    grouped_mediation_analysis,
     _build_fe_matrix,
     _fit_with_cluster_se,
 )
@@ -58,6 +56,14 @@ def format_coef(coef, pval):
 
 def format_tval(tval):
     return f"({tval:.4f})"
+
+
+def format_pval(pval):
+    if pval is None or (isinstance(pval, float) and np.isnan(pval)):
+        return "nan"
+    if pval < 0.001:
+        return "<0.001"
+    return f"{pval:.4f}"
 
 
 def fit_model(df, dep_var, core_vars, df_pre=None):
@@ -318,6 +324,42 @@ def build_main_table_docx(doc, df):
     )
 
 
+def build_mediation_table_docx(doc, df):
+    """表3 全样本中介效应检验。"""
+    summary = df["summary"] if isinstance(df, dict) else run_regressions(df)["summary"]
+    add_table_title(doc, "表3  管理层权力中介效应检验（全样本）")
+
+    rows = [
+        ("lnSubsidy → Overpay（总效应 c）", f"{summary['coef_c']:.4f}", format_pval(summary["p_c"])),
+        ("lnSubsidy → Power（路径 a）", f"{summary['coef_a']:.4f}", format_pval(summary["p_a"])),
+        ("Power → Overpay（路径 b）", f"{summary['coef_b']:.4f}", format_pval(summary["p_b"])),
+        ("lnSubsidy → Overpay（直接效应 c'）", f"{summary['coef_c_prime']:.4f}", format_pval(summary["p_c_prime"])),
+        ("间接效应（a×b）", f"{summary['indirect_effect']:.6f}", "—"),
+        ("Sobel Z", f"{summary['sobel_z']:.4f}", "—"),
+        ("Sobel p", f"{summary['sobel_p']:.4f}", "—"),
+        ("Bootstrap p", format_pval(summary["bootstrap_p"]), "—"),
+        ("Bootstrap 95%CI", f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}]", "—"),
+        ("中介效应占比(%)", f"{summary['mediation_ratio_pct']:.2f}", "—"),
+    ]
+
+    table = doc.add_table(rows=1 + len(rows), cols=3)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    headers = ["路径", "系数", "p值"]
+    for i, header in enumerate(headers):
+        set_cell_text(table.cell(0, i), header, bold=True)
+    for row_idx, row in enumerate(rows, start=1):
+        set_cell_text(table.cell(row_idx, 0), row[0], alignment=WD_ALIGN_PARAGRAPH.LEFT)
+        set_cell_text(table.cell(row_idx, 1), row[1])
+        set_cell_text(table.cell(row_idx, 2), row[2])
+
+    apply_three_line_style(table, header_rows=1)
+    add_table_note(
+        doc,
+        f"注：原始结论为“{summary['conclusion']}”，严格口径为“{summary['rigor_conclusion']}”；"
+        f"cluster bootstrap 次数={summary['bootstrap_reps']}。"
+    )
+
+
 def build_subsample_table_docx(doc, df, title, group_specs):
     """分组回归表（统一样本）"""
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
@@ -343,6 +385,43 @@ def build_subsample_table_docx(doc, df, title, group_specs):
         "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。标准误为公司层面聚类稳健标准误。",
         extra_rows=[("Industry FE", fe), ("Year FE", fe)],
     )
+
+
+def build_grouped_mediation_table_docx(doc, df):
+    """附表A 分组中介效应汇总。"""
+    summary_df = df if hasattr(df, "columns") else grouped_mediation_analysis(df)
+    add_table_title(doc, "附表A  分组中介效应汇总（含分层FDR与bootstrap复核）")
+
+    cols = [
+        ("层级", "layer"),
+        ("分组", "group"),
+        ("N", "sample_size"),
+        ("聚类数", "n_clusters"),
+        ("路径a", "coef_a"),
+        ("路径b", "coef_b"),
+        ("原始Sobel_p", "sobel_p"),
+        ("FDR_p", "fdr_p"),
+        ("严格口径", "rigor_conclusion"),
+    ]
+    table = doc.add_table(rows=1 + len(summary_df), cols=len(cols))
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for i, (label, _) in enumerate(cols):
+        set_cell_text(table.cell(0, i), label, bold=True, font_size=9.5)
+
+    for row_idx, (_, row) in enumerate(summary_df.iterrows(), start=1):
+        for col_idx, (label, key) in enumerate(cols):
+            value = row[key]
+            if key in {"coef_a", "coef_b"}:
+                text = f"{value:.4f}"
+            elif key in {"sobel_p", "fdr_p"}:
+                text = format_pval(value)
+            else:
+                text = str(value)
+            align = WD_ALIGN_PARAGRAPH.LEFT if key in {"layer", "group", "rigor_conclusion"} else WD_ALIGN_PARAGRAPH.CENTER
+            set_cell_text(table.cell(row_idx, col_idx), text, alignment=align, font_size=9.5)
+
+    apply_three_line_style(table, header_rows=1)
+    add_table_note(doc, "注：FDR 为在“产权直分”“补充分组”两个层级内分别进行的 BH 校正；bootstrap 仅对原始 Sobel p<0.10 的分组执行。")
 
 
 def build_robustness_table_docx(doc, df):
@@ -386,7 +465,7 @@ def build_robustness_table_docx(doc, df):
     checks.append(("(6) 滞后一期", "Overpay", m6, n6, "lnSubsidy_l1"))
 
     # 构建表格
-    add_table_title(doc, "表6  稳健性检验结果")
+    add_table_title(doc, "表7  稳健性检验结果")
     n_checks = len(checks)
     # 行：表头2 + 系数1 + t值1 + Controls + Industry FE + Year FE + N + R² = 9
     table = doc.add_table(rows=9, cols=1 + n_checks)
@@ -437,11 +516,9 @@ def build_robustness_table_docx(doc, df):
 def main():
     data_dir = os.path.join(os.getcwd(), "processed_data")
     print("加载数据...")
-    df = load_and_clean_data(data_dir)
-    df = construct_variables(df)
-    df = filter_and_describe(df)
-    df = compute_overpay(df)
-    df = compute_power(df)
+    df, _ = build_analysis_dataset(data_dir)
+    main_results = run_regressions(df)
+    grouped_results = grouped_mediation_analysis(df)
 
     print("\n生成 Word 文档...")
     doc = Document()
@@ -480,32 +557,38 @@ def main():
     print("  生成表2 主回归...")
     build_main_table_docx(doc, df)
 
+    print("  生成表3 中介效应...")
+    build_mediation_table_docx(doc, main_results)
+
     soe_df = df[df["IsSOE"] == 1].copy()
     identified_ratio = soe_df["IsCentralSOE"].notna().mean() if len(soe_df) > 0 else np.nan
 
-    print("  生成表3 分产权性质...")
+    print("  生成表4 分产权性质...")
     build_subsample_table_docx(
         doc, df,
-        "表3  分产权性质回归结果",
-        [("国有", df["IsSOE"] == 1), ("非国有", df["IsSOE"] == 0)],
+        "表4  分产权性质回归结果",
+        [("国有", df["IsSOE"] == 1), ("私营", df["IsPrivate"] == 1)],
     )
 
-    print("  生成表4 分行业管制...")
+    print("  生成表5 分行业管制...")
     build_subsample_table_docx(
         doc, df,
-        "表4  分行业管制回归结果",
+        "表5  分行业管制回归结果",
         [("管制行业", df["RegulatedIndustry"] == 1), ("非管制行业", df["RegulatedIndustry"] == 0)],
     )
 
-    print("  生成表5 央企vs地方国企...")
+    print("  生成表6 央企vs地方国企...")
     build_subsample_table_docx(
         doc, df,
-        f"表5  央企与地方国企回归结果（央地可识别比例={identified_ratio:.2%}）",
+        f"表6  央企与地方国企回归结果（央地可识别比例={identified_ratio:.2%}）",
         [("央企", df["IsCentralSOE"] == 1), ("地方国企", df["IsCentralSOE"] == 0)],
     )
 
-    print("  生成表6 稳健性检验...")
+    print("  生成表7 稳健性检验...")
     build_robustness_table_docx(doc, df)
+
+    print("  生成附表A 分组中介效应汇总...")
+    build_grouped_mediation_table_docx(doc, grouped_results)
 
     # 保存
     output_dir = os.path.join(os.getcwd(), "results")

@@ -36,15 +36,20 @@
 │   ├── validate_conversion.py      # Step 2: 转换结果验证
 │   ├── regression_analysis.py      # Step 3: 计量经济学回归分析（核心）
 │   ├── generate_tables.py          # Step 4: 生成论文格式回归表格
-│   └── ml_analysis.py              # Step 5: 数据挖掘分析
+│   ├── generate_tables_docx.py     # Step 5: 生成 Word 回归结果表
+│   └── ml_analysis.py              # Step 6: 数据挖掘分析
 │
 ├── results/                        # 分析结果
 │   ├── regression_tables.txt       # 论文格式回归结果表（所有数值的唯一来源）
 │   ├── regression_dataset.csv      # 含全部构造变量的最终数据集
+│   ├── grouped_mediation_results.csv # 分组中介效应结构化结果
+│   ├── pca_diagnostics_summary.csv # PCA 整体诊断结果
+│   ├── pca_variable_metrics.csv    # PCA 分变量 KMO 与载荷
 │   ├── 数据分析部分_整理.md        # 论文第四、五章完整文档（最新版）
 │   ├── 论文实证结果摘要.md          # 实证结果摘要（快速查阅用）
 │   ├── 回归模型设定.md              # 模型设定与估计方法说明
 │   ├── model_comparison.csv        # ML 模型性能对比
+│   ├── ml_summary.json             # ML 核心指标汇总
 │   ├── fig1_lasso_path.png         # Lasso 正则化路径图
 │   ├── fig2_rf_importance.png      # 随机森林特征重要性
 │   ├── fig3_shap_summary.png       # SHAP 特征重要性
@@ -95,7 +100,10 @@ python scripts/regression_analysis.py
 # 4. 生成论文格式表格（统一公司层面聚类标准误）
 python scripts/generate_tables.py
 
-# 5. 数据挖掘分析（随机森林 + XGBoost + SHAP + 聚类）
+# 5. 生成 Word 版回归表
+python scripts/generate_tables_docx.py
+
+# 6. 数据挖掘分析（随机森林 + XGBoost + SHAP + 聚类）
 python scripts/ml_analysis.py
 ```
 
@@ -107,16 +115,19 @@ python scripts/ml_analysis.py
 
 | 模型 | 公式 | 用途 |
 |:---|:---|:---|
-| 模型1 | lnCEOpay = α₀ + α₁·lnSale + α₂·Roa + α₃·IA + α₄·Zone + ΣIndustry + **ΣYear** + ε | 期望薪酬（残差=Overpay，经1%/99% Winsorize） |
+| 模型1 | lnCEOpay = α₀ + α₁·lnSale + α₂·Roa + α₃·IA + α₄·Zone + ΣIndustry + **ΣYear** + ε | 期望薪酬（原始薪酬沿用既有缩尾口径） |
 | 模型3 | Overpay = α₀ + α₁·lnSubsidy + Controls + ΣIndustry + ΣYear + ε | 基准回归（检验 H1） |
 | 模型4 | Overpay = α₀ + α₁·lnSubsidy + α₂·Power + Controls + ΣIndustry + ΣYear + ε | 中介效应检验 |
 | 模型5 | Power = α₀ + α₁·lnSubsidy + Controls + ΣIndustry + ΣYear + ε | 补助→权力路径 |
 
 - 标准误：公司层面聚类稳健标准误
-- 中介效应：Baron & Kenny 逐步法 + Sobel 检验
+- 中介效应：Baron & Kenny 逐步法 + Sobel 检验 + 公司层面 cluster bootstrap（全样本与候选分组）
+- 分组严谨性：在“产权直分”“补充分组”两个层级内分别进行 BH-FDR 校正
+- 分组中介：产权直分（国有/私营/央企/地方国企）+ 补充分组（东部、2003-2012、地方国企×东部等）
 - 机制检验：管制行业/非管制行业、央企/地方国企
 - 稳健性：替换被解释变量、样本期缩减、极值处理、制造业子样本、解释变量替换、滞后一期补助
 - 管制行业口径：`B/D/G/I/N` 行业大类；央地口径：实控人代码 `2100=央企`、`2120=地方国企`
+- PCA 诊断：KMO = 0.5649，Bartlett p < 0.001，第一主成分方差贡献率 = 34.57%
 
 ### 数据挖掘部分
 
@@ -134,4 +145,5 @@ python scripts/ml_analysis.py
 
 - **CSMAR（国泰安）数据库**
 - 样本：2003-2024 年 A 股上市公司（剔除金融行业）
-- 最终样本量：52,402 个公司-年观测值（当前口径下）
+- 最终筛选样本量：52,358 个公司-年观测值
+- 主回归统一样本量：44,831 个公司-年观测值

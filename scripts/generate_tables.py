@@ -12,11 +12,9 @@ warnings.filterwarnings("ignore")
 import sys
 sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
 from regression_analysis import (
-    load_and_clean_data,
-    construct_variables,
-    filter_and_describe,
-    compute_overpay,
-    compute_power,
+    build_analysis_dataset,
+    run_regressions,
+    grouped_mediation_analysis,
     _build_fe_matrix,
     _fit_with_cluster_se,
 )
@@ -35,6 +33,14 @@ def format_coef(coef, pval):
 
 def format_tval(tval):
     return f"({tval:.4f})"
+
+
+def format_pval(pval):
+    if pd.isna(pval):
+        return "nan"
+    if pval < 0.001:
+        return "<0.001"
+    return f"{pval:.4f}"
 
 
 def fit_cluster_model(df, dep_var, core_vars, df_pre=None):
@@ -103,6 +109,83 @@ def build_main_table(df):
     )
     lines.append("=" * 90)
     lines.append("注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。标准误为公司层面聚类稳健标准误。")
+    return "\n".join(lines)
+
+
+def build_mediation_table(df):
+    """表3 全样本中介效应检验。"""
+    summary = df["summary"] if isinstance(df, dict) else run_regressions(df)["summary"]
+
+    lines = []
+    lines.append("")
+    lines.append("=" * 90)
+    lines.append("表3  管理层权力中介效应检验（全样本）")
+    lines.append("=" * 90)
+    lines.append(f"{'路径':<28} {'系数':<18} {'p值':<18}")
+    lines.append("-" * 90)
+    rows = [
+        ("lnSubsidy → Overpay（总效应 c）", f"{summary['coef_c']:.4f}", format_pval(summary["p_c"])),
+        ("lnSubsidy → Power（路径 a）", f"{summary['coef_a']:.4f}", format_pval(summary["p_a"])),
+        ("Power → Overpay（路径 b）", f"{summary['coef_b']:.4f}", format_pval(summary["p_b"])),
+        ("lnSubsidy → Overpay（直接效应 c'）", f"{summary['coef_c_prime']:.4f}", format_pval(summary["p_c_prime"])),
+        ("间接效应（a×b）", f"{summary['indirect_effect']:.6f}", "—"),
+        ("Sobel Z", f"{summary['sobel_z']:.4f}", "—"),
+        ("Sobel p", f"{summary['sobel_p']:.4f}", "—"),
+        ("Bootstrap p", format_pval(summary["bootstrap_p"]), "—"),
+        ("Bootstrap 95%CI", f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}]", "—"),
+        ("中介效应占比(%)", f"{summary['mediation_ratio_pct']:.2f}", "—"),
+    ]
+    for label, coef, pval in rows:
+        lines.append(f"{label:<28} {coef:<18} {pval:<18}")
+    lines.append("-" * 90)
+    lines.append(f"原始结论：{summary['conclusion']}")
+    lines.append(f"严格口径：{summary['rigor_conclusion']}")
+    lines.append("=" * 90)
+    lines.append("注：全样本补充报告公司层面 cluster bootstrap（300次）；若 bootstrap 95%CI 不含0，则视为 bootstrap 支持。")
+    return "\n".join(lines)
+
+
+def build_grouped_mediation_table(df):
+    """附表A 分组中介效应汇总。"""
+    summary_df = df if isinstance(df, pd.DataFrame) else grouped_mediation_analysis(df)
+    display_df = summary_df.copy()
+    display_df.rename(columns={
+        "layer": "层级",
+        "group": "分组",
+        "sample_size": "N",
+        "n_clusters": "聚类数",
+        "coef_a": "路径a",
+        "coef_b": "路径b",
+        "sobel_p": "原始Sobel_p",
+        "fdr_p": "FDR_p",
+        "conclusion": "原始结论",
+        "fdr_conclusion": "FDR结论",
+        "rigor_conclusion": "严格口径",
+    }, inplace=True)
+
+    display_df["Bootstrap 95%CI"] = display_df.apply(
+        lambda row: (
+            f"[{row['bootstrap_ci_lower']:.6f}, {row['bootstrap_ci_upper']:.6f}]"
+            if pd.notna(row["bootstrap_ci_lower"]) and pd.notna(row["bootstrap_ci_upper"])
+            else "未执行"
+        ),
+        axis=1,
+    )
+
+    cols = ["层级", "分组", "N", "聚类数", "路径a", "路径b", "原始Sobel_p", "FDR_p", "Bootstrap 95%CI", "严格口径"]
+    for col in ["路径a", "路径b"]:
+        display_df[col] = display_df[col].map(lambda x: f"{x:.4f}" if pd.notna(x) else "nan")
+    for col in ["原始Sobel_p", "FDR_p"]:
+        display_df[col] = display_df[col].map(format_pval)
+
+    lines = []
+    lines.append("")
+    lines.append("=" * 180)
+    lines.append("附表A  分组中介效应汇总（含分层FDR与bootstrap复核）")
+    lines.append("=" * 180)
+    lines.append(display_df[cols].to_string(index=False))
+    lines.append("=" * 180)
+    lines.append("注：FDR 为在“产权直分”“补充分组”两个层级内分别进行的 BH 校正；bootstrap 仅对原始 Sobel p<0.10 的分组执行。")
     return "\n".join(lines)
 
 
@@ -330,23 +413,24 @@ def build_robustness_table(df):
     return "\n".join(lines)
 
 
-def generate_tables(df):
+def generate_tables(df, main_results, grouped_results):
     """生成论文结果表并保存"""
     table1 = build_desc_table(df)
     table2 = build_main_table(df)
-
-    table3 = build_subsample_table(
-        df,
-        "表3  分产权性质回归结果（聚类标准误）",
-        [
-            ("国有", df["IsSOE"] == 1),
-            ("非国有", df["IsSOE"] == 0),
-        ],
-    )
+    table3 = build_mediation_table(main_results)
 
     table4 = build_subsample_table(
         df,
-        "表4  分行业管制回归结果（聚类标准误）",
+        "表4  分产权性质回归结果（聚类标准误）",
+        [
+            ("国有", df["IsSOE"] == 1),
+            ("私营", df["IsPrivate"] == 1),
+        ],
+    )
+
+    table5 = build_subsample_table(
+        df,
+        "表5  分行业管制回归结果（聚类标准误）",
         [
             ("管制行业", df["RegulatedIndustry"] == 1),
             ("非管制行业", df["RegulatedIndustry"] == 0),
@@ -355,18 +439,19 @@ def generate_tables(df):
 
     soe_df = df[df["IsSOE"] == 1].copy()
     identified_ratio = soe_df["IsCentralSOE"].notna().mean() if len(soe_df) > 0 else np.nan
-    table5 = build_subsample_table(
+    table6 = build_subsample_table(
         df,
-        f"表5  央企与地方国企回归结果（聚类标准误，央地可识别比例={identified_ratio:.2%}）",
+        f"表6  央企与地方国企回归结果（聚类标准误，央地可识别比例={identified_ratio:.2%}）",
         [
             ("央企", df["IsCentralSOE"] == 1),
             ("地方国企", df["IsCentralSOE"] == 0),
         ],
     )
 
-    table6 = build_robustness_table(df)
+    table7 = build_robustness_table(df).replace("表6  稳健性检验结果（聚类标准误）", "表7  稳健性检验结果（聚类标准误）")
+    appendix_a = build_grouped_mediation_table(grouped_results)
 
-    all_tables = "\n\n".join([table1, table2, table3, table4, table5, table6])
+    all_tables = "\n\n".join([table1, table2, table3, table4, table5, table6, table7, appendix_a])
     print(all_tables)
 
     output_dir = os.path.join(os.getcwd(), "results")
@@ -380,19 +465,16 @@ def generate_tables(df):
 def main():
     data_dir = os.path.join(os.getcwd(), "processed_data")
     print("加载数据...")
-    df = load_and_clean_data(data_dir)
-    df = construct_variables(df)
-    df = filter_and_describe(df)
-    df = compute_overpay(df)
-    df = compute_power(df)
+    df, _ = build_analysis_dataset(data_dir)
+    main_results = run_regressions(df)
+    grouped_results = grouped_mediation_analysis(df)
 
     print("\n\n" + "#" * 90)
     print("#  以下为论文格式回归结果表格（公司层面聚类标准误）")
     print("#" * 90 + "\n")
 
-    generate_tables(df)
+    generate_tables(df, main_results, grouped_results)
 
 
 if __name__ == "__main__":
     main()
-
