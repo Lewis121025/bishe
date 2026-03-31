@@ -63,7 +63,7 @@ def fit_cluster_model(df, dep_var, core_vars, df_pre=None):
 
 
 def build_main_table(df):
-    """表2 主回归：模型3/4/5（统一样本）"""
+    """表3 主回归：模型3/4/5（统一样本）"""
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
 
     # 统一样本：取模型4所需全部变量的交集
@@ -78,10 +78,10 @@ def build_main_table(df):
 
     lines = []
     lines.append("=" * 90)
-    lines.append("表2  政府补助、管理层权力与高管超额薪酬的回归结果（聚类标准误）")
+    lines.append("表3  政府补助、管理层权力与高管超额薪酬的回归结果（修订后主测度：Power 为 FA）")
     lines.append("=" * 90)
     lines.append(f"{'变量':<15} {'模型(3)':<24} {'模型(4)':<24} {'模型(5)':<24}")
-    lines.append(f"{'':15} {'因变量:Overpay':<24} {'因变量:Overpay':<24} {'因变量:Power':<24}")
+    lines.append(f"{'':15} {'因变量:Overpay':<24} {'因变量:Overpay':<24} {'因变量:Power(FA)':<24}")
     lines.append("-" * 90)
 
     for var in display_vars:
@@ -108,18 +108,18 @@ def build_main_table(df):
         f"{(m5.rsquared if m5 else np.nan):<24.4f}"
     )
     lines.append("=" * 90)
-    lines.append("注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。标准误为公司层面聚类稳健标准误。")
+    lines.append("注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。Power 为因子分析（FA）构造的修订后主测度；PCA 结果作为上一版原始方案对照另行报告。标准误为公司层面聚类稳健标准误。")
     return "\n".join(lines)
 
 
 def build_mediation_table(df):
-    """表3 全样本中介效应检验。"""
+    """表4 全样本中介效应检验。"""
     summary = df["summary"] if isinstance(df, dict) else run_regressions(df)["summary"]
 
     lines = []
     lines.append("")
     lines.append("=" * 90)
-    lines.append("表3  管理层权力中介效应检验（全样本）")
+    lines.append("表4  管理层权力中介效应检验（全样本，修订后主测度：Power 为 FA）")
     lines.append("=" * 90)
     lines.append(f"{'路径':<28} {'系数':<18} {'p值':<18}")
     lines.append("-" * 90)
@@ -130,18 +130,77 @@ def build_mediation_table(df):
         ("lnSubsidy → Overpay（直接效应 c'）", f"{summary['coef_c_prime']:.4f}", format_pval(summary["p_c_prime"])),
         ("间接效应（a×b）", f"{summary['indirect_effect']:.6f}", "—"),
         ("Sobel Z", f"{summary['sobel_z']:.4f}", "—"),
-        ("Sobel p", f"{summary['sobel_p']:.4f}", "—"),
+        ("Sobel p", format_pval(summary["sobel_p"]), summary["sobel_signal"]),
         ("Bootstrap p", format_pval(summary["bootstrap_p"]), "—"),
         ("Bootstrap 95%CI", f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}]", "—"),
+        ("路径a显著", "是" if summary["path_a_significant"] else "否", "—"),
+        ("路径b显著", "是" if summary["path_b_significant"] else "否", "—"),
         ("中介效应占比(%)", f"{summary['mediation_ratio_pct']:.2f}", "—"),
     ]
     for label, coef, pval in rows:
         lines.append(f"{label:<28} {coef:<18} {pval:<18}")
     lines.append("-" * 90)
-    lines.append(f"原始结论：{summary['conclusion']}")
-    lines.append(f"严格口径：{summary['rigor_conclusion']}")
+    lines.append(f"中介类型：{summary['mediation_type']}")
     lines.append("=" * 90)
-    lines.append("注：全样本补充报告公司层面 cluster bootstrap（300次）；若 bootstrap 95%CI 不含0，则视为 bootstrap 支持。")
+    lines.append("注：常规中介效应要求路径a、路径b均显著、间接效应方向与总效应一致，且 bootstrap 95%CI 不含0；PCA 原始方案对照与熵值法稳健性结果另行比较报告。")
+    return "\n".join(lines)
+
+
+def build_first_stage_table(df):
+    """表2 第一阶段期望薪酬模型。"""
+    core_vars = ["lnSale", "Roa", "IA", "Zone"]
+    model, n = fit_cluster_model(df, "lnCEOpay", core_vars)
+
+    display_vars = ["lnSale", "Roa", "IA", "Zone"]
+    explanations = {
+        "lnSale": "企业规模越大，期望薪酬越高",
+        "Roa": "盈利能力越强，期望薪酬越高",
+        "IA": "无形资产占比较高时，期望薪酬相对较低",
+        "Zone": "中西部地区样本的期望薪酬相对较低",
+    }
+
+    lines = []
+    lines.append("")
+    lines.append("=" * 90)
+    lines.append("表2  第一阶段期望薪酬模型估计结果")
+    lines.append("=" * 90)
+    lines.append(f"{'变量':<15} {'系数':<20} {'t值':<20} {'说明'}")
+    lines.append("-" * 90)
+    for var in display_vars:
+        coef = format_coef(model.params[var], model.pvalues[var]) if model is not None else "nan"
+        tval = format_tval(model.tvalues[var]) if model is not None else ""
+        lines.append(f"{var:<15} {coef:<20} {tval:<20} {explanations[var]}")
+    lines.append("-" * 90)
+    lines.append(f"{'Industry FE':<15} {'控制':<20} {'':<20} {'17 个行业虚拟变量'}")
+    lines.append(f"{'Year FE':<15} {'控制':<20} {'':<20} {'21 个年份虚拟变量'}")
+    lines.append(f"{'N':<15} {n:<20} {'':<20} {'—'}")
+    lines.append(f"{'R-squared':<15} {(model.rsquared if model else np.nan):<20.4f} {'':<20} {'—'}")
+    lines.append("=" * 90)
+    lines.append("注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。该模型用于估计正常薪酬水平，并据此构造超额薪酬 Overpay。标准误为公司层面聚类稳健标准误。")
+    return "\n".join(lines)
+
+
+def build_power_method_comparison_table(main_results):
+    """表5 Power 构造方法比较。"""
+    method_df = main_results["method_comparison"].copy()
+    if method_df.empty:
+        return ""
+
+    lines = []
+    lines.append("")
+    lines.append("=" * 110)
+    lines.append("表5  `Power` 不同构造口径下的全样本中介结果比较")
+    lines.append("=" * 110)
+    lines.append(f"{'方法':<12} {'角色':<18} {'路径b':<18} {'bootstrap 95%CI':<34} {'结论'}")
+    lines.append("-" * 110)
+    for _, row in method_df.iterrows():
+        coef_b = format_coef(row["coef_b"], row["p_b"])
+        ci = f"[{row['bootstrap_ci_lower']:.6f}, {row['bootstrap_ci_upper']:.6f}]"
+        lines.append(
+            f"{row['method']:<12} {row['role']:<18} {coef_b:<18} {ci:<34} {row['mediation_type']}"
+        )
+    lines.append("=" * 110)
+    lines.append("注：FA 为修订后主测度，PCA 为上一版原始方案对照，熵值法为稳健性替代。bootstrap 95%CI 为公司层面 cluster bootstrap（300 次）得到的 95% 置信区间。")
     return "\n".join(lines)
 
 
@@ -158,9 +217,9 @@ def build_grouped_mediation_table(df):
         "coef_b": "路径b",
         "sobel_p": "原始Sobel_p",
         "fdr_p": "FDR_p",
-        "conclusion": "原始结论",
-        "fdr_conclusion": "FDR结论",
-        "rigor_conclusion": "严格口径",
+        "path_b_significant": "路径b显著",
+        "mediation_type": "中介类型",
+        "group_evidence_level": "严谨口径",
     }, inplace=True)
 
     display_df["Bootstrap 95%CI"] = display_df.apply(
@@ -172,20 +231,21 @@ def build_grouped_mediation_table(df):
         axis=1,
     )
 
-    cols = ["层级", "分组", "N", "聚类数", "路径a", "路径b", "原始Sobel_p", "FDR_p", "Bootstrap 95%CI", "严格口径"]
+    cols = ["层级", "分组", "N", "聚类数", "路径a", "路径b", "原始Sobel_p", "FDR_p", "路径b显著", "Bootstrap 95%CI", "中介类型", "严谨口径"]
     for col in ["路径a", "路径b"]:
         display_df[col] = display_df[col].map(lambda x: f"{x:.4f}" if pd.notna(x) else "nan")
     for col in ["原始Sobel_p", "FDR_p"]:
         display_df[col] = display_df[col].map(format_pval)
+    display_df["路径b显著"] = display_df["路径b显著"].map(lambda x: "是" if bool(x) else "否")
 
     lines = []
     lines.append("")
     lines.append("=" * 180)
-    lines.append("附表A  分组中介效应汇总（含分层FDR与bootstrap复核）")
+    lines.append("附表A  分组中介效应汇总（FA 修订后主测度，含分层FDR与bootstrap复核）")
     lines.append("=" * 180)
     lines.append(display_df[cols].to_string(index=False))
     lines.append("=" * 180)
-    lines.append("注：FDR 为在“产权直分”“补充分组”两个层级内分别进行的 BH 校正；bootstrap 仅对原始 Sobel p<0.10 的分组执行。")
+    lines.append("注：FDR 为在“产权直分”“补充分组”两个层级内分别进行的 BH 校正；bootstrap 仅对原始 Sobel p<0.10 的分组执行。严谨口径在中介类型基础上进一步要求通过相应层内 FDR，未通过者仅可谨慎解释。")
     return "\n".join(lines)
 
 
@@ -264,8 +324,8 @@ def build_desc_table(df):
     desc_vars_map = {
         "Top3Salary": "高管前三名薪酬总额",
         "SubsidyAmount": "政府补助",
-        "Overpay": "超额薪酬",
-        "Power": "管理层权力",
+        "Overpay": "超额薪酬(Overpay)",
+        "Power": "管理层权力(Power, FA)",
         "Roa": "业绩(Roa)",
         "Revenue": "营业收入",
         "Lever": "财务杠杆",
@@ -295,7 +355,7 @@ def build_desc_table(df):
 
 
 def build_robustness_table(df):
-    """表6 稳健性检验汇总表"""
+    """表9 稳健性检验汇总表"""
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
     core_vars = ["lnSubsidy"] + control_vars
     results = []
@@ -340,7 +400,7 @@ def build_robustness_table(df):
     lines = []
     lines.append("")
     lines.append("=" * line_width)
-    lines.append("表6  稳健性检验结果（聚类标准误）")
+    lines.append("表9  稳健性检验结果（聚类标准误）")
     lines.append("=" * line_width)
 
     # 表头行1：检验编号
@@ -416,21 +476,23 @@ def build_robustness_table(df):
 def generate_tables(df, main_results, grouped_results):
     """生成论文结果表并保存"""
     table1 = build_desc_table(df)
-    table2 = build_main_table(df)
-    table3 = build_mediation_table(main_results)
+    table2 = build_first_stage_table(df)
+    table3 = build_main_table(df)
+    table4 = build_mediation_table(main_results)
+    table5 = build_power_method_comparison_table(main_results)
 
-    table4 = build_subsample_table(
+    table6 = build_subsample_table(
         df,
-        "表4  分产权性质回归结果（聚类标准误）",
+        "表6  分产权性质回归结果（聚类标准误）",
         [
             ("国有", df["IsSOE"] == 1),
             ("私营", df["IsPrivate"] == 1),
         ],
     )
 
-    table5 = build_subsample_table(
+    table7 = build_subsample_table(
         df,
-        "表5  分行业管制回归结果（聚类标准误）",
+        "表7  分行业管制回归结果（聚类标准误）",
         [
             ("管制行业", df["RegulatedIndustry"] == 1),
             ("非管制行业", df["RegulatedIndustry"] == 0),
@@ -439,19 +501,19 @@ def generate_tables(df, main_results, grouped_results):
 
     soe_df = df[df["IsSOE"] == 1].copy()
     identified_ratio = soe_df["IsCentralSOE"].notna().mean() if len(soe_df) > 0 else np.nan
-    table6 = build_subsample_table(
+    table8 = build_subsample_table(
         df,
-        f"表6  央企与地方国企回归结果（聚类标准误，央地可识别比例={identified_ratio:.2%}）",
+        f"表8  央企与地方国企回归结果（聚类标准误，央地可识别比例={identified_ratio:.2%}）",
         [
             ("央企", df["IsCentralSOE"] == 1),
             ("地方国企", df["IsCentralSOE"] == 0),
         ],
     )
 
-    table7 = build_robustness_table(df).replace("表6  稳健性检验结果（聚类标准误）", "表7  稳健性检验结果（聚类标准误）")
+    table9 = build_robustness_table(df)
     appendix_a = build_grouped_mediation_table(grouped_results)
 
-    all_tables = "\n\n".join([table1, table2, table3, table4, table5, table6, table7, appendix_a])
+    all_tables = "\n\n".join([table1, table2, table3, table4, table5, table6, table7, table8, table9, appendix_a])
     print(all_tables)
 
     output_dir = os.path.join(os.getcwd(), "results")

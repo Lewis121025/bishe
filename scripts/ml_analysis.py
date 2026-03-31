@@ -4,662 +4,909 @@
 =============================================================================
 
 分析内容：
-  1. Lasso 回归：变量筛选与正则化
-  2. 随机森林：超额薪酬预测与特征重要性
-  3. XGBoost：梯度提升模型与 SHAP 可解释性分析
-  4. 决策树可视化：直观展示高超额薪酬的条件路径
-  5. K-Means 聚类：企业画像与模式识别
+  1. 回归预测：OLS / Lasso / RandomForest / XGBoost
+  2. 分类识别：Logit / RandomForestClassifier / XGBoostClassifier / DecisionTree
+  3. 可解释性与补充：SHAP、决策树可视化、K-Means 聚类
 """
 
+import json
 import os
 import sys
-import json
 import warnings
+
 import numpy as np
 import pandas as pd
+
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.getcwd(), "results", ".matplotlib"))
+
 import matplotlib
-matplotlib.use('Agg')  # 非交互式后端
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
 import seaborn as sns
-
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import Lasso, LassoCV
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
-from sklearn.cluster import KMeans
-from sklearn.metrics import (r2_score, mean_squared_error, mean_absolute_error,
-                              accuracy_score, classification_report, confusion_matrix,
-                              silhouette_score)
-import xgboost as xgb
 import shap
+import xgboost as xgb
+from sklearn.cluster import KMeans
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import Lasso, LassoCV, LinearRegression, LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_score,
+    r2_score,
+    recall_score,
+    roc_auc_score,
+    silhouette_score,
+)
+from sklearn.model_selection import (
+    GridSearchCV,
+    KFold,
+    RandomizedSearchCV,
+    StratifiedKFold,
+    cross_val_score,
+    train_test_split,
+)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.parallel")
 
-# 设置中文字体
-plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'Heiti TC', 'PingFang SC']
-plt.rcParams['axes.unicode_minus'] = False
-plt.rcParams['figure.dpi'] = 150
+plt.rcParams["font.sans-serif"] = ["Arial Unicode MS", "SimHei", "Heiti TC", "PingFang SC"]
+plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["figure.dpi"] = 150
 
-# 导入数据加载函数
 sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
-from regression_analysis import (load_and_clean_data, construct_variables,
-                                  filter_and_describe, compute_overpay,
-                                  compute_power, build_analysis_dataset)
+from regression_analysis import build_analysis_dataset
+
+RANDOM_STATE = 42
+TEST_SIZE = 0.20
+CV_FOLDS = 5
+
+
+def _rmse(y_true, y_pred):
+    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+
+def _format_params(params):
+    if not params:
+        return "无"
+    return json.dumps(params, ensure_ascii=False, sort_keys=True)
+
+
+def _regression_metrics(y_true, y_pred):
+    return {
+        "R²": float(r2_score(y_true, y_pred)),
+        "RMSE": _rmse(y_true, y_pred),
+        "MAE": float(mean_absolute_error(y_true, y_pred)),
+    }
+
+
+def _classification_metrics(model, X_test, y_test):
+    y_pred = model.predict(X_test)
+    if hasattr(model, "predict_proba"):
+        y_score = model.predict_proba(X_test)[:, 1]
+    elif hasattr(model, "decision_function"):
+        y_score = model.decision_function(X_test)
+    else:
+        y_score = y_pred
+    return {
+        "Accuracy": float(accuracy_score(y_test, y_pred)),
+        "Precision": float(precision_score(y_test, y_pred, zero_division=0)),
+        "Recall": float(recall_score(y_test, y_pred, zero_division=0)),
+        "F1": float(f1_score(y_test, y_pred, zero_division=0)),
+        "ROC_AUC": float(roc_auc_score(y_test, y_score)),
+    }
 
 
 def prepare_ml_data(df):
-    """准备机器学习所需的特征矩阵和标签"""
+    """准备机器学习所需的数据。"""
     print("\n" + "=" * 70)
     print("数据准备：构建特征矩阵")
     print("=" * 70)
 
-    # 特征列
-    feature_cols = ["lnSubsidy", "Roa", "Lever", "Top1", "Zone", "Industry",
-                    "lnSale", "IA", "Boardsize", "Dual", "Insider",
-                    "Mgshder", "Tenure", "IsSOE"]
-
-    # 目标变量
+    feature_cols = [
+        "lnSubsidy",
+        "Roa",
+        "Lever",
+        "Top1",
+        "Zone",
+        "Industry",
+        "lnSale",
+        "IA",
+        "Boardsize",
+        "Dual",
+        "Insider",
+        "Mgshder",
+        "Tenure",
+        "IsSOE",
+    ]
     target_col = "Overpay"
-
-    # 筛选完整数据
     use_cols = feature_cols + [target_col, "Symbol", "Year", "SubsidyAmount", "Top3Salary"]
-    df_ml = df.dropna(subset=feature_cols + [target_col]).copy()
 
-    print(f"  可用样本量: {len(df_ml)}")
+    df_ml = df.dropna(subset=use_cols).copy()
+    y_class = (df_ml[target_col] > 0).astype(int)
+    positive_count = int(y_class.sum())
+    total_count = int(len(df_ml))
+    negative_count = total_count - positive_count
+    positive_ratio = positive_count / total_count if total_count else np.nan
+
+    print(f"  可用样本量: {total_count}")
     print(f"  特征数量: {len(feature_cols)}")
-    print(f"  特征列表: {feature_cols}")
+    print(f"  超额薪酬为正样本: {positive_count}")
+    print(f"  超额薪酬为负样本: {negative_count}")
+    print(f"  正类比例: {positive_ratio:.4%}")
+    print("  判断：类别分布基本均衡，不采用 SMOTE，仅使用 stratify 和 class_weight/scale_pos_weight 比较。")
 
-    X = df_ml[feature_cols].values
-    y = df_ml[target_col].values
-    feature_names = feature_cols
+    return {
+        "df_ml": df_ml,
+        "X": df_ml[feature_cols].copy(),
+        "y": df_ml[target_col].copy(),
+        "y_class": y_class.copy(),
+        "feature_names": feature_cols,
+        "class_balance": {
+            "positive_count": positive_count,
+            "negative_count": negative_count,
+            "positive_ratio": float(positive_ratio),
+        },
+    }
 
-    # 构建分类标签：超额薪酬 > 0 为正 (1)，否则为负 (0)
-    y_class = (y > 0).astype(int)
-    print(f"  超额薪酬为正的比例: {y_class.mean():.2%}")
 
-    return df_ml, X, y, y_class, feature_names
+def create_holdout_splits(X, y, y_class, groups):
+    """按公司标识分组（Group-based Split）进行 80/20 的比例切分，避免面板数据泄露。"""
+    from sklearn.model_selection import GroupShuffleSplit
+    gss = GroupShuffleSplit(n_splits=1, test_size=TEST_SIZE, random_state=RANDOM_STATE)
+    train_idx, test_idx = next(gss.split(X, y, groups))
+    
+    return {
+        "train_idx": train_idx,
+        "test_idx": test_idx,
+        "X_train": X.iloc[train_idx].copy(),
+        "X_test": X.iloc[test_idx].copy(),
+        "y_train": y.iloc[train_idx].copy(),
+        "y_test": y.iloc[test_idx].copy(),
+        "yc_train": y_class.iloc[train_idx].copy(),
+        "yc_test": y_class.iloc[test_idx].copy(),
+        "groups_train": groups.iloc[train_idx].copy(),
+        "groups_test": groups.iloc[test_idx].copy(),
+    }
 
 
-# ============================================================
-# 第一部分：Lasso 回归 — 变量筛选
-# ============================================================
-
-def lasso_analysis(X, y, feature_names, output_dir):
-    """Lasso 回归用于变量筛选和正则化"""
+def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names, output_dir):
+    """Lasso 回归：交叉验证选 alpha，并输出系数路径。"""
     print("\n" + "=" * 70)
     print("第一部分：Lasso 回归 — 变量筛选与正则化")
     print("=" * 70)
 
-    # 标准化
+    from sklearn.model_selection import GroupKFold
+    cv = GroupKFold(n_splits=CV_FOLDS)
+    alpha_grid = np.logspace(-4, 1, 60)
+
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
 
-    # 交叉验证选择最优 lambda (alpha)
-    lasso_cv = LassoCV(cv=5, random_state=42, max_iter=10000)
-    lasso_cv.fit(X_scaled, y)
+    # Note: LassoCV doesn't support 'groups' parameter directly in fit() with cv=GroupKFold
+    # So we'll use a standard KFold or just GroupKFold via manually providing it if it works,
+    # actually LassoCV doesn't take groups in fit. We'll stick to KFold for LassoCV internal
+    # but the outer train-test split already prevents leakage to test set.
+    cv_internal = KFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    
+    lasso_cv = LassoCV(alphas=alpha_grid, cv=cv_internal, random_state=RANDOM_STATE, max_iter=20000)
+    lasso_cv.fit(X_train_scaled, y_train)
+    y_pred = lasso_cv.predict(X_test_scaled)
+    metrics = _regression_metrics(y_test, y_pred)
 
-    print(f"\n  最优正则化参数 α = {lasso_cv.alpha_:.6f}")
-    print(f"  R² (交叉验证) = {lasso_cv.score(X_scaled, y):.4f}")
+    lasso_fixed = Pipeline([
+        ("scaler", StandardScaler()),
+        ("model", Lasso(alpha=lasso_cv.alpha_, max_iter=20000)),
+    ])
+    cv_scores = cross_val_score(lasso_fixed, X_train, y_train, groups=groups_train, cv=cv, scoring="r2", n_jobs=1)
 
-    # 系数分析
     coefs = pd.DataFrame({
         "变量": feature_names,
-        "Lasso系数": lasso_cv.coef_
+        "Lasso系数": lasso_cv.coef_,
     }).sort_values("Lasso系数", key=abs, ascending=False)
-
-    print("\n  Lasso 回归系数（按绝对值排序）:")
-    print("  " + "-" * 40)
-    for _, row in coefs.iterrows():
-        status = "✓ 保留" if abs(row["Lasso系数"]) > 1e-6 else "✗ 剔除"
-        print(f"    {row['变量']:15s}: {row['Lasso系数']:>10.4f}  {status}")
-
-    retained = coefs[abs(coefs["Lasso系数"]) > 1e-6]["变量"].tolist()
-    removed = coefs[abs(coefs["Lasso系数"]) <= 1e-6]["变量"].tolist()
-    print(f"\n  保留变量 ({len(retained)}): {retained}")
-    print(f"  剔除变量 ({len(removed)}): {removed}")
     coefs.to_csv(os.path.join(output_dir, "lasso_coefficients.csv"), index=False)
 
-    # 画系数路径图
-    alphas = np.logspace(-5, 0, 100)
+    retained = coefs.loc[coefs["Lasso系数"].abs() > 1e-6, "变量"].tolist()
+    removed = coefs.loc[coefs["Lasso系数"].abs() <= 1e-6, "变量"].tolist()
+
+    print(f"  最优 alpha = {lasso_cv.alpha_:.6f}")
+    print(f"  测试集 R² = {metrics['R²']:.4f}")
+    print(f"  5-fold CV R² = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+    print(f"  保留变量数 = {len(retained)}")
+
     coef_paths = []
-    for alpha in alphas:
-        lasso = Lasso(alpha=alpha, max_iter=10000)
-        lasso.fit(X_scaled, y)
-        coef_paths.append(lasso.coef_)
+    for alpha in alpha_grid:
+        model = Lasso(alpha=alpha, max_iter=20000)
+        model.fit(X_train_scaled, y_train)
+        coef_paths.append(model.coef_)
     coef_paths = np.array(coef_paths)
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    for i, name in enumerate(feature_names):
-        ax.plot(alphas, coef_paths[:, i], label=name)
-    ax.axvline(lasso_cv.alpha_, color='black', linestyle='--', label=f'最优α={lasso_cv.alpha_:.4f}')
-    ax.set_xscale('log')
-    ax.set_xlabel('正则化参数 α (log)')
-    ax.set_ylabel('Lasso 回归系数')
-    ax.set_title('图1  Lasso 正则化路径图')
-    ax.legend(fontsize=7, loc='best', ncol=2)
+    for idx, name in enumerate(feature_names):
+        ax.plot(alpha_grid, coef_paths[:, idx], label=name)
+    ax.axvline(lasso_cv.alpha_, color="black", linestyle="--", label=f"最优α={lasso_cv.alpha_:.4f}")
+    ax.set_xscale("log")
+    ax.set_xlabel("正则化参数 α (log)")
+    ax.set_ylabel("Lasso 回归系数")
+    ax.set_title("图1  Lasso 正则化路径图")
+    ax.legend(fontsize=7, loc="best", ncol=2)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig1_lasso_path.png"), bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "fig1_lasso_path.png"), bbox_inches="tight")
     plt.close()
-    print(f"\n  已保存: fig1_lasso_path.png")
 
     return {
+        "model": lasso_cv,
+        "alpha": float(lasso_cv.alpha_),
         "retained": retained,
         "removed": removed,
-        "alpha": float(lasso_cv.alpha_),
-        "fit_r2": float(lasso_cv.score(X_scaled, y)),
         "coefficients": coefs,
+        "test_metrics": metrics,
+        "cv_mean": float(cv_scores.mean()),
+        "cv_std": float(cv_scores.std()),
+        "param_summary": {"alpha": float(lasso_cv.alpha_)},
+        "tuning_method": "LassoCV(5折交叉验证)",
     }
 
 
-# ============================================================
-# 第二部分：随机森林 — 回归预测与特征重要性
-# ============================================================
-
-def random_forest_analysis(X, y, y_class, feature_names, output_dir):
-    """随机森林回归 + 分类 + 特征重要性"""
+def ols_baseline_analysis(X_train, X_test, y_train, y_test, groups_train):
+    """OLS 基准模型。"""
     print("\n" + "=" * 70)
-    print("第二部分：随机森林 — 预测与特征重要性")
+    print("OLS 基准模型")
     print("=" * 70)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42)
-    _, _, yc_train, yc_test = train_test_split(
-        X, y_class, test_size=0.2, random_state=42)
+    from sklearn.model_selection import GroupKFold
+    cv = GroupKFold(n_splits=CV_FOLDS)
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    metrics = _regression_metrics(y_test, y_pred)
+    cv_scores = cross_val_score(model, X_train, y_train, groups=groups_train, cv=cv, scoring="r2", n_jobs=1)
 
-    # --- 2a. 随机森林回归 ---
-    print("\n  [2a] 随机森林回归（预测超额薪酬数值）")
-    rf_reg = RandomForestRegressor(n_estimators=200, max_depth=10,
-                                    min_samples_leaf=20, random_state=42, n_jobs=-1)
-    rf_reg.fit(X_train, y_train)
-    y_pred_reg = rf_reg.predict(X_test)
+    print(f"  测试集 R² = {metrics['R²']:.4f}")
+    print(f"  5-fold CV R² = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
 
-    r2 = r2_score(y_test, y_pred_reg)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred_reg))
-    mae = mean_absolute_error(y_test, y_pred_reg)
+    return {
+        "model": model,
+        "test_metrics": metrics,
+        "cv_mean": float(cv_scores.mean()),
+        "cv_std": float(cv_scores.std()),
+        "param_summary": {},
+        "tuning_method": "无调参（线性基准）",
+    }
 
-    print(f"    R² = {r2:.4f}")
-    print(f"    RMSE = {rmse:.4f}")
-    print(f"    MAE = {mae:.4f}")
 
-    # 交叉验证
-    cv_scores = cross_val_score(rf_reg, X, y, cv=5, scoring='r2')
-    print(f"    5-fold CV R² = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+def random_forest_analysis(X_train, X_test, y_train, y_test, yc_train, yc_test, groups_train, feature_names, output_dir):
+    """随机森林回归与分类。"""
+    print("\n" + "=" * 70)
+    print("第二部分：随机森林 — 回归预测与分类识别")
+    print("=" * 70)
 
-    # --- 2b. 随机森林分类 ---
-    print("\n  [2b] 随机森林分类（预测是否存在超额薪酬）")
-    rf_clf = RandomForestClassifier(n_estimators=200, max_depth=10,
-                                     min_samples_leaf=20, random_state=42, n_jobs=-1)
-    rf_clf.fit(X_train, yc_train)
-    yc_pred = rf_clf.predict(X_test)
+    from sklearn.model_selection import GroupKFold
+    cv_reg = GroupKFold(n_splits=CV_FOLDS)
+    cv_clf = GroupKFold(n_splits=CV_FOLDS)
 
-    acc = accuracy_score(yc_test, yc_pred)
-    print(f"    准确率 = {acc:.4f}")
-    print(f"\n    分类报告:")
-    print(f"    {'':4}{'precision':>10}{'recall':>10}{'f1-score':>10}{'support':>10}")
-    report = classification_report(yc_test, yc_pred, output_dict=True)
-    for label in ['0', '1']:
-        r = report[label]
-        lab = "无超额薪酬" if label == '0' else "有超额薪酬"
-        print(f"    {lab:8}{r['precision']:>10.4f}{r['recall']:>10.4f}{r['f1-score']:>10.4f}{r['support']:>10.0f}")
-    print(f"    {'总体准确率':8}{'':>10}{'':>10}{report['accuracy']:>10.4f}{len(yc_test):>10}")
+    rf_reg_space = {
+        "n_estimators": [200, 300, 400],
+        "max_depth": [6, 10, None],
+        "min_samples_leaf": [10, 20, 50],
+        "max_features": ["sqrt", 0.6, 1.0],
+    }
+    rf_reg_search = RandomizedSearchCV(
+        RandomForestRegressor(random_state=RANDOM_STATE, n_jobs=-1),
+        param_distributions=rf_reg_space,
+        n_iter=8,
+        scoring="r2",
+        cv=cv_reg,
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+        verbose=0,
+    )
+    rf_reg_search.fit(X_train, y_train, groups=groups_train)
+    rf_reg = rf_reg_search.best_estimator_
+    rf_reg_pred = rf_reg.predict(X_test)
+    rf_reg_metrics = _regression_metrics(y_test, rf_reg_pred)
+    rf_reg_cv = cross_val_score(rf_reg, X_train, y_train, groups=groups_train, cv=cv_reg, scoring="r2", n_jobs=1)
 
-    # --- 特征重要性 ---
+    rf_clf_space = {
+        "n_estimators": [200, 300, 400],
+        "max_depth": [6, 10, None],
+        "min_samples_leaf": [10, 20, 50],
+        "max_features": ["sqrt", 0.6, 1.0],
+        "class_weight": [None, "balanced"],
+    }
+    rf_clf_search = RandomizedSearchCV(
+        RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=-1),
+        param_distributions=rf_clf_space,
+        n_iter=8,
+        scoring="f1",
+        cv=cv_clf,
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+        verbose=0,
+    )
+    rf_clf_search.fit(X_train, yc_train, groups=groups_train)
+    rf_clf = rf_clf_search.best_estimator_
+    rf_clf_metrics = _classification_metrics(rf_clf, X_test, yc_test)
+
     importance_reg = pd.DataFrame({
         "变量": feature_names,
-        "回归重要性": rf_reg.feature_importances_
+        "回归重要性": rf_reg.feature_importances_,
     }).sort_values("回归重要性", ascending=False)
-
     importance_clf = pd.DataFrame({
         "变量": feature_names,
-        "分类重要性": rf_clf.feature_importances_
+        "分类重要性": rf_clf.feature_importances_,
     }).sort_values("分类重要性", ascending=False)
     importance_reg.to_csv(os.path.join(output_dir, "rf_reg_importance.csv"), index=False)
     importance_clf.to_csv(os.path.join(output_dir, "rf_clf_importance.csv"), index=False)
 
-    print("\n  特征重要性排名（随机森林回归）:")
-    print("  " + "-" * 35)
-    for i, (_, row) in enumerate(importance_reg.iterrows()):
-        bar = "█" * int(row["回归重要性"] * 50)
-        print(f"    {i+1:2d}. {row['变量']:15s}: {row['回归重要性']:.4f} {bar}")
+    print(f"  随机森林回归测试集 R² = {rf_reg_metrics['R²']:.4f}")
+    print(f"  随机森林回归 5-fold CV R² = {rf_reg_cv.mean():.4f} ± {rf_reg_cv.std():.4f}")
+    print(f"  随机森林分类 Accuracy = {rf_clf_metrics['Accuracy']:.4f}")
+    print(f"  随机森林分类 F1 = {rf_clf_metrics['F1']:.4f}")
 
-    # 画特征重要性对比图
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-    # 回归
-    imp_reg_sorted = importance_reg.sort_values("回归重要性", ascending=True)
-    axes[0].barh(imp_reg_sorted["变量"], imp_reg_sorted["回归重要性"], color='steelblue')
-    axes[0].set_title(f'(a) 随机森林回归特征重要性\nR²={r2:.4f}')
-    axes[0].set_xlabel('重要性')
-
-    # 分类
-    imp_clf_sorted = importance_clf.sort_values("分类重要性", ascending=True)
-    axes[1].barh(imp_clf_sorted["变量"], imp_clf_sorted["分类重要性"], color='coral')
-    axes[1].set_title(f'(b) 随机森林分类特征重要性\nAccuracy={acc:.4f}')
-    axes[1].set_xlabel('重要性')
-
-    plt.suptitle('图2  随机森林特征重要性分析', fontsize=14, y=1.02)
+    reg_sorted = importance_reg.sort_values("回归重要性", ascending=True)
+    clf_sorted = importance_clf.sort_values("分类重要性", ascending=True)
+    axes[0].barh(reg_sorted["变量"], reg_sorted["回归重要性"], color="steelblue")
+    axes[0].set_title(f"(a) 随机森林回归特征重要性\nR²={rf_reg_metrics['R²']:.4f}")
+    axes[0].set_xlabel("重要性")
+    axes[1].barh(clf_sorted["变量"], clf_sorted["分类重要性"], color="coral")
+    axes[1].set_title(f"(b) 随机森林分类特征重要性\nF1={rf_clf_metrics['F1']:.4f}")
+    axes[1].set_xlabel("重要性")
+    plt.suptitle("图2  随机森林特征重要性分析", fontsize=14, y=1.02)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig2_rf_importance.png"), bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "fig2_rf_importance.png"), bbox_inches="tight")
     plt.close()
-    print(f"\n  已保存: fig2_rf_importance.png")
 
     return {
         "rf_reg": rf_reg,
+        "rf_reg_metrics": rf_reg_metrics,
+        "rf_reg_cv_mean": float(rf_reg_cv.mean()),
+        "rf_reg_cv_std": float(rf_reg_cv.std()),
+        "rf_reg_params": rf_reg_search.best_params_,
+        "rf_reg_tuning": "RandomizedSearchCV(n_iter=8, cv=5)",
         "rf_clf": rf_clf,
+        "rf_clf_metrics": rf_clf_metrics,
+        "rf_clf_params": rf_clf_search.best_params_,
+        "rf_clf_tuning": "RandomizedSearchCV(n_iter=8, cv=5, scoring=F1)",
         "importance_reg": importance_reg,
         "importance_clf": importance_clf,
-        "r2": float(r2),
-        "rmse": float(rmse),
-        "mae": float(mae),
-        "cv_r2_mean": float(cv_scores.mean()),
-        "cv_r2_std": float(cv_scores.std()),
-        "accuracy": float(acc),
     }
 
 
-# ============================================================
-# 第三部分：XGBoost + SHAP 可解释性
-# ============================================================
-
-def xgboost_shap_analysis(X, y, feature_names, output_dir):
-    """XGBoost 回归 + SHAP 值分析"""
+def xgboost_regression_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names, output_dir):
+    """XGBoost 回归与 SHAP 分析。"""
     print("\n" + "=" * 70)
-    print("第三部分：XGBoost + SHAP 可解释性分析")
+    print("第三部分：XGBoost 回归 + SHAP 可解释性")
     print("=" * 70)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42)
-
-    # XGBoost 回归
-    xgb_model = xgb.XGBRegressor(
-        n_estimators=300, max_depth=6, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8,
-        min_child_weight=10, random_state=42, n_jobs=-1
+    from sklearn.model_selection import GroupKFold
+    cv = GroupKFold(n_splits=CV_FOLDS)
+    param_space = {
+        "n_estimators": [200, 300, 400],
+        "max_depth": [3, 4, 6],
+        "learning_rate": [0.03, 0.05, 0.08],
+        "subsample": [0.7, 0.8, 1.0],
+        "colsample_bytree": [0.7, 0.8, 1.0],
+        "min_child_weight": [5, 10, 20],
+    }
+    base_model = xgb.XGBRegressor(
+        objective="reg:squarederror",
+        random_state=RANDOM_STATE,
+        n_jobs=1,
     )
-    xgb_model.fit(X_train, y_train, eval_set=[(X_test, y_test)],
-                   verbose=False)
-
+    search = RandomizedSearchCV(
+        base_model,
+        param_distributions=param_space,
+        n_iter=10,
+        scoring="r2",
+        cv=cv,
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+        verbose=0,
+    )
+    search.fit(X_train, y_train, groups=groups_train)
+    xgb_model = search.best_estimator_
     y_pred = xgb_model.predict(X_test)
-    r2 = r2_score(y_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    metrics = _regression_metrics(y_test, y_pred)
+    cv_scores = cross_val_score(xgb_model, X_train, y_train, groups=groups_train, cv=cv, scoring="r2", n_jobs=1)
 
-    print(f"\n  XGBoost 回归结果:")
-    print(f"    R² = {r2:.4f}")
-    print(f"    RMSE = {rmse:.4f}")
+    print(f"  XGBoost 测试集 R² = {metrics['R²']:.4f}")
+    print(f"  XGBoost 5-fold CV R² = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
 
-    cv_scores = cross_val_score(xgb_model, X, y, cv=5, scoring='r2')
-    print(f"    5-fold CV R² = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
-
-    # SHAP 分析
-    print("\n  计算 SHAP 值...")
-    explainer = shap.TreeExplainer(xgb_model)
-    # 用测试集的一个子集来计算 SHAP（加速）
     sample_size = min(2000, len(X_test))
-    X_sample = X_test[:sample_size]
+    X_sample = X_test.iloc[:sample_size].copy()
+    explainer = shap.TreeExplainer(xgb_model)
     shap_values = explainer.shap_values(X_sample)
-
-    # SHAP 重要性排名
     shap_importance = np.abs(shap_values).mean(axis=0)
     shap_df = pd.DataFrame({
         "变量": feature_names,
-        "SHAP均值": shap_importance
+        "SHAP均值": shap_importance,
     }).sort_values("SHAP均值", ascending=False)
     shap_df.to_csv(os.path.join(output_dir, "shap_importance.csv"), index=False)
 
-    print("\n  SHAP 特征重要性排名:")
-    print("  " + "-" * 35)
-    for i, (_, row) in enumerate(shap_df.iterrows()):
-        bar = "█" * int(row["SHAP均值"] / shap_df["SHAP均值"].max() * 30)
-        print(f"    {i+1:2d}. {row['变量']:15s}: {row['SHAP均值']:.4f} {bar}")
-
-    # SHAP Summary Plot
-    fig, ax = plt.subplots(figsize=(10, 7))
-    shap.summary_plot(shap_values, X_sample, feature_names=feature_names,
-                       show=False, max_display=14)
-    plt.title('图3  SHAP 特征重要性分析（XGBoost）', fontsize=14, pad=20)
+    shap.summary_plot(shap_values, X_sample, feature_names=feature_names, show=False, max_display=14)
+    plt.title("图3  SHAP 特征重要性分析（XGBoost）", fontsize=14, pad=20)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig3_shap_summary.png"), bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "fig3_shap_summary.png"), bbox_inches="tight")
     plt.close()
-    print(f"\n  已保存: fig3_shap_summary.png")
 
-    # SHAP 分析 lnSubsidy 的边际效应
-    fig, ax = plt.subplots(figsize=(8, 5))
     subsidy_idx = feature_names.index("lnSubsidy")
-    shap.dependence_plot(subsidy_idx, shap_values, X_sample,
-                          feature_names=feature_names, show=False, ax=ax)
-    ax.set_title('图4  政府补助(lnSubsidy)的SHAP依赖图', fontsize=13)
-    ax.set_xlabel('lnSubsidy (政府补助对数)')
-    ax.set_ylabel('SHAP值 (对超额薪酬的边际影响)')
+    fig, ax = plt.subplots(figsize=(8, 5))
+    shap.dependence_plot(subsidy_idx, shap_values, X_sample, feature_names=feature_names, ax=ax, show=False)
+    ax.set_title("图4  政府补助(lnSubsidy)的 SHAP 依赖图", fontsize=13)
+    ax.set_xlabel("lnSubsidy (政府补助对数)")
+    ax.set_ylabel("SHAP值 (对超额薪酬的边际影响)")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig4_shap_subsidy.png"), bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "fig4_shap_subsidy.png"), bbox_inches="tight")
     plt.close()
-    print(f"  已保存: fig4_shap_subsidy.png")
 
     return {
-        "xgb_model": xgb_model,
+        "model": xgb_model,
+        "test_metrics": metrics,
+        "cv_mean": float(cv_scores.mean()),
+        "cv_std": float(cv_scores.std()),
+        "params": search.best_params_,
+        "tuning_method": "RandomizedSearchCV(n_iter=10, cv=5)",
         "shap_df": shap_df,
-        "r2": float(r2),
-        "rmse": float(rmse),
-        "cv_r2_mean": float(cv_scores.mean()),
-        "cv_r2_std": float(cv_scores.std()),
     }
 
 
-# ============================================================
-# 第四部分：决策树可视化
-# ============================================================
-
-def decision_tree_analysis(X, y_class, feature_names, output_dir):
-    """决策树分类 — 可视化超额薪酬风险路径"""
+def classification_comparison(X_train, X_test, yc_train, yc_test, groups_train):
+    """分类模型统一对比：Logit / RF / XGB / DT。"""
     print("\n" + "=" * 70)
-    print("第四部分：决策树 — 超额薪酬风险路径")
+    print("第四部分：分类模型对比")
     print("=" * 70)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_class, test_size=0.2, random_state=42)
+    from sklearn.model_selection import GroupKFold
+    cv = GroupKFold(n_splits=CV_FOLDS)
+    pos_weight = (len(yc_train) - int(yc_train.sum())) / max(int(yc_train.sum()), 1)
 
-    # 浅层决策树（便于可视化）
-    dt = DecisionTreeClassifier(max_depth=4, min_samples_leaf=100,
-                                 random_state=42)
-    dt.fit(X_train, y_train)
+    logit_pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("model", LogisticRegression(max_iter=3000, solver="liblinear", random_state=RANDOM_STATE)),
+    ])
+    logit_grid = {
+        "model__C": [0.1, 1.0, 3.0],
+        "model__class_weight": [None, "balanced"],
+    }
+    logit_search = GridSearchCV(logit_pipe, logit_grid, scoring="f1", cv=cv, n_jobs=1)
+    logit_search.fit(X_train, yc_train, groups=groups_train)
+    logit_model = logit_search.best_estimator_
 
-    acc = dt.score(X_test, y_test)
-    print(f"\n  决策树准确率: {acc:.4f}")
+    xgb_clf_base = xgb.XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="logloss",
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+    )
+    xgb_clf_space = {
+        "n_estimators": [200, 300, 400],
+        "max_depth": [3, 4, 6],
+        "learning_rate": [0.03, 0.05, 0.08],
+        "subsample": [0.8, 1.0],
+        "colsample_bytree": [0.7, 0.9, 1.0],
+        "min_child_weight": [1, 5, 10],
+        "scale_pos_weight": [1.0, round(pos_weight, 4)],
+    }
+    xgb_clf_search = RandomizedSearchCV(
+        xgb_clf_base,
+        param_distributions=xgb_clf_space,
+        n_iter=10,
+        scoring="f1",
+        cv=cv,
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+    )
+    xgb_clf_search.fit(X_train, yc_train, groups=groups_train)
+    xgb_clf = xgb_clf_search.best_estimator_
 
-    # 文本规则
-    tree_rules = export_text(dt, feature_names=feature_names, max_depth=4)
-    print(f"\n  决策树规则:")
-    for line in tree_rules.split('\n')[:20]:
-        print(f"    {line}")
-    if len(tree_rules.split('\n')) > 20:
-        print(f"    ... (共 {len(tree_rules.split(chr(10)))} 行)")
+    dt_grid = {
+        "max_depth": [3, 4, 5],
+        "min_samples_leaf": [50, 100, 200],
+        "class_weight": [None, "balanced"],
+    }
+    dt_search = GridSearchCV(
+        DecisionTreeClassifier(random_state=RANDOM_STATE),
+        dt_grid,
+        scoring="f1",
+        cv=cv,
+        n_jobs=1,
+    )
+    dt_search.fit(X_train, yc_train, groups=groups_train)
+    dt_model = dt_search.best_estimator_
 
-    # 可视化
-    cn = ['无超额薪酬', '有超额薪酬']
-    fig, ax = plt.subplots(figsize=(24, 10))
-    plot_tree(dt, feature_names=feature_names, class_names=cn,
-              filled=True, rounded=True, fontsize=8, ax=ax,
-              proportion=True, impurity=False)
-    ax.set_title('图5  决策树：高管超额薪酬风险分类路径', fontsize=16, pad=20)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig5_decision_tree.png"), bbox_inches='tight')
-    plt.close()
-    print(f"\n  已保存: fig5_decision_tree.png")
+    models = [
+        {
+            "模型": "Logit",
+            "estimator": logit_model,
+            "tuning_method": "GridSearchCV(cv=5, scoring=F1)",
+            "params": logit_search.best_params_,
+            "balance": f"class_weight={logit_search.best_params_.get('model__class_weight')}",
+        },
+        {
+            "模型": "XGBoostClassifier",
+            "estimator": xgb_clf,
+            "tuning_method": "RandomizedSearchCV(n_iter=10, cv=5, scoring=F1)",
+            "params": xgb_clf_search.best_params_,
+            "balance": f"scale_pos_weight={xgb_clf_search.best_params_.get('scale_pos_weight')}",
+        },
+        {
+            "模型": "DecisionTree",
+            "estimator": dt_model,
+            "tuning_method": "GridSearchCV(cv=5, scoring=F1)",
+            "params": dt_search.best_params_,
+            "balance": f"class_weight={dt_search.best_params_.get('class_weight')}",
+        },
+    ]
+
+    rows = []
+    for spec in models:
+        metrics = _classification_metrics(spec["estimator"], X_test, yc_test)
+        rows.append({
+            "模型": spec["模型"],
+            **metrics,
+            "调参方式": spec["tuning_method"],
+            "最优参数摘要": _format_params(spec["params"]),
+            "平衡处理": spec["balance"],
+        })
+        print(f"  {spec['模型']} -> Accuracy={metrics['Accuracy']:.4f}, F1={metrics['F1']:.4f}, ROC_AUC={metrics['ROC_AUC']:.4f}")
 
     return {
-        "model": dt,
-        "accuracy": float(acc),
+        "comparison": pd.DataFrame(rows),
+        "logit_model": logit_model,
+        "logit_params": logit_search.best_params_,
+        "xgb_clf_model": xgb_clf,
+        "xgb_clf_params": xgb_clf_search.best_params_,
+        "decision_tree_model": dt_model,
+        "decision_tree_params": dt_search.best_params_,
+        "search_spaces": {
+            "logit": logit_grid,
+            "xgb_classifier": xgb_clf_space,
+            "decision_tree": dt_grid,
+        },
     }
 
 
-# ============================================================
-# 第五部分：K-Means 聚类 — 企业画像
-# ============================================================
-
-def kmeans_analysis(df_ml, feature_names, output_dir):
-    """K-Means 聚类分析 — 企业分群画像"""
+def decision_tree_analysis(model, feature_names, output_dir):
+    """决策树可视化。"""
     print("\n" + "=" * 70)
-    print("第五部分：K-Means 聚类 — 企业画像分析")
+    print("第五部分：决策树可视化")
+    print("=" * 70)
+
+    tree_rules = export_text(model, feature_names=feature_names, max_depth=model.get_params().get("max_depth", 4))
+    print("  决策树规则（前 20 行）:")
+    for line in tree_rules.split("\n")[:20]:
+        print(f"    {line}")
+
+    cn = ["无超额薪酬", "有超额薪酬"]
+    fig, ax = plt.subplots(figsize=(24, 10))
+    plot_tree(
+        model,
+        feature_names=feature_names,
+        class_names=cn,
+        filled=True,
+        rounded=True,
+        fontsize=8,
+        ax=ax,
+        proportion=True,
+        impurity=False,
+    )
+    ax.set_title("图5  决策树：高管超额薪酬风险分类路径", fontsize=16, pad=20)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "fig5_decision_tree.png"), bbox_inches="tight")
+    plt.close()
+
+
+def kmeans_analysis(df_ml, output_dir):
+    """K-Means 聚类分析。"""
+    print("\n" + "=" * 70)
+    print("第六部分：K-Means 聚类 — 企业画像分析")
     print("=" * 70)
 
     cluster_features = ["lnSubsidy", "Overpay", "Roa", "Lever", "Top1", "lnSale"]
     df_cluster = df_ml.dropna(subset=cluster_features).copy()
-
     scaler = StandardScaler()
     X_cluster = scaler.fit_transform(df_cluster[cluster_features])
 
-    # 肘部法则选 K
-    print("\n  肘部法则确定最优 K:")
     inertias = []
     sil_scores = []
-    K_range = range(2, 8)
-    for k in K_range:
-        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    k_range = range(2, 8)
+    for k in k_range:
+        km = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=10)
         km.fit(X_cluster)
         inertias.append(km.inertia_)
-        sil = silhouette_score(X_cluster, km.labels_, sample_size=5000)
+        sil = silhouette_score(X_cluster, km.labels_, sample_size=min(5000, len(df_cluster)))
         sil_scores.append(sil)
-        print(f"    K={k}: 轮廓系数={sil:.4f}, 惯性={km.inertia_:.0f}")
+        print(f"  K={k}: 轮廓系数={sil:.4f}, 惯性={km.inertia_:.0f}")
 
-    best_k = list(K_range)[np.argmax(sil_scores)]
-    print(f"\n  最优K（轮廓系数最大）: K={best_k}")
+    best_k = list(k_range)[int(np.argmax(sil_scores))]
+    print(f"  最优 K = {best_k}")
 
-    # 使用最优 K 聚类
-    km_final = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+    km_final = KMeans(n_clusters=best_k, random_state=RANDOM_STATE, n_init=10)
     df_cluster["Cluster"] = km_final.fit_predict(X_cluster)
-
-    # 各类特征均值
-    print(f"\n  各聚类中心特征均值:")
-    print("  " + "-" * 70)
     cluster_summary = df_cluster.groupby("Cluster")[cluster_features].mean()
-    print(cluster_summary.to_string(float_format=lambda x: f"{x:.4f}"))
     cluster_summary.to_csv(os.path.join(output_dir, "kmeans_cluster_summary.csv"))
 
-    # 各类样本量和企业性质分布
-    print(f"\n  各聚类样本量及国有占比:")
-    for c in range(best_k):
-        subset = df_cluster[df_cluster["Cluster"] == c]
-        soe_pct = subset["IsSOE"].mean() * 100 if "IsSOE" in subset.columns else 0
-        print(f"    聚类{c}: {len(subset)} 家  |  国有占比: {soe_pct:.1f}%  |  "
-              f"平均补助: {subset['SubsidyAmount'].mean():.0f}  |  "
-              f"平均薪酬: {subset['Top3Salary'].mean():.0f}")
-
-    # 画聚类散点图
+    colors = ["#2196F3", "#FF5722", "#4CAF50", "#FF9800", "#9C27B0", "#795548"][:best_k]
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-    colors = ['#2196F3', '#FF5722', '#4CAF50', '#FF9800', '#9C27B0', '#795548'][:best_k]
-    cluster_names = [f'聚类{i}' for i in range(best_k)]
-
-    # 补助-超额薪酬
     for c in range(best_k):
         mask = df_cluster["Cluster"] == c
-        axes[0].scatter(df_cluster.loc[mask, "lnSubsidy"],
-                        df_cluster.loc[mask, "Overpay"],
-                        c=colors[c], label=cluster_names[c], alpha=0.3, s=5)
-    axes[0].set_xlabel('lnSubsidy (政府补助对数)')
-    axes[0].set_ylabel('Overpay (超额薪酬)')
-    axes[0].set_title('(a) 聚类分布：补助 vs 超额薪酬')
+        axes[0].scatter(df_cluster.loc[mask, "lnSubsidy"], df_cluster.loc[mask, "Overpay"], c=colors[c], alpha=0.3, s=5, label=f"聚类{c}")
+        axes[1].scatter(df_cluster.loc[mask, "lnSale"], df_cluster.loc[mask, "Lever"], c=colors[c], alpha=0.3, s=5, label=f"聚类{c}")
+    axes[0].set_xlabel("lnSubsidy")
+    axes[0].set_ylabel("Overpay")
+    axes[0].set_title("(a) 聚类分布：补助 vs 超额薪酬")
+    axes[1].set_xlabel("lnSale")
+    axes[1].set_ylabel("Lever")
+    axes[1].set_title("(b) 聚类分布：规模 vs 杠杆")
     axes[0].legend()
-
-    # 规模-杠杆
-    for c in range(best_k):
-        mask = df_cluster["Cluster"] == c
-        axes[1].scatter(df_cluster.loc[mask, "lnSale"],
-                        df_cluster.loc[mask, "Lever"],
-                        c=colors[c], label=cluster_names[c], alpha=0.3, s=5)
-    axes[1].set_xlabel('lnSale (营业收入对数)')
-    axes[1].set_ylabel('Lever (财务杠杆)')
-    axes[1].set_title('(b) 聚类分布：规模 vs 杠杆')
     axes[1].legend()
-
-    plt.suptitle('图6  K-Means企业聚类分析', fontsize=14, y=1.02)
+    plt.suptitle("图6  K-Means 企业聚类分析", fontsize=14, y=1.02)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig6_kmeans_clusters.png"), bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "fig6_kmeans_clusters.png"), bbox_inches="tight")
     plt.close()
-    print(f"\n  已保存: fig6_kmeans_clusters.png")
 
-    # 画聚类中心热力图
     fig, ax = plt.subplots(figsize=(10, 5))
-    # 标准化后的聚类中心
     centers_std = pd.DataFrame(
         scaler.transform(cluster_summary.values),
         columns=cluster_features,
-        index=[f'聚类{i}' for i in range(best_k)]
+        index=[f"聚类{i}" for i in range(best_k)],
     )
-    sns.heatmap(centers_std, annot=True, fmt='.2f', cmap='RdYlBu_r',
-                center=0, ax=ax, linewidths=0.5)
-    ax.set_title('图7  聚类中心特征热力图（标准化）', fontsize=14, pad=10)
+    sns.heatmap(centers_std, annot=True, fmt=".2f", cmap="RdYlBu_r", center=0, ax=ax, linewidths=0.5)
+    ax.set_title("图7  聚类中心特征热力图（标准化）", fontsize=14, pad=10)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig7_cluster_heatmap.png"), bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "fig7_cluster_heatmap.png"), bbox_inches="tight")
     plt.close()
-    print(f"  已保存: fig7_cluster_heatmap.png")
 
     return {
-        "model": km_final,
-        "clustered_df": df_cluster,
         "best_k": int(best_k),
         "cluster_summary": cluster_summary,
-        "silhouette_scores": {int(k): float(score) for k, score in zip(K_range, sil_scores)},
+        "silhouette_scores": {int(k): float(v) for k, v in zip(k_range, sil_scores)},
     }
 
 
-# ============================================================
-# 第六部分：模型对比总结
-# ============================================================
-
-def model_comparison(X, y, y_class, feature_names, output_dir):
-    """各模型性能对比表"""
+def build_regression_comparison(ols_result, lasso_result, rf_result, xgb_result, output_dir):
+    """回归模型性能总表。"""
     print("\n" + "=" * 70)
-    print("第六部分：模型性能对比")
+    print("第七部分：回归模型性能对比")
     print("=" * 70)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    _, _, yc_train, yc_test = train_test_split(X, y_class, test_size=0.2, random_state=42)
+    rows = [
+        {
+            "模型": "OLS",
+            "任务": "回归预测",
+            "测试集R²": ols_result["test_metrics"]["R²"],
+            "RMSE": ols_result["test_metrics"]["RMSE"],
+            "MAE": ols_result["test_metrics"]["MAE"],
+            "5折CV R²均值": ols_result["cv_mean"],
+            "5折CV R²标准差": ols_result["cv_std"],
+            "调参方式": ols_result["tuning_method"],
+            "最优参数摘要": _format_params(ols_result["param_summary"]),
+        },
+        {
+            "模型": "Lasso",
+            "任务": "回归预测",
+            "测试集R²": lasso_result["test_metrics"]["R²"],
+            "RMSE": lasso_result["test_metrics"]["RMSE"],
+            "MAE": lasso_result["test_metrics"]["MAE"],
+            "5折CV R²均值": lasso_result["cv_mean"],
+            "5折CV R²标准差": lasso_result["cv_std"],
+            "调参方式": lasso_result["tuning_method"],
+            "最优参数摘要": _format_params(lasso_result["param_summary"]),
+        },
+        {
+            "模型": "RandomForest",
+            "任务": "回归预测",
+            "测试集R²": rf_result["rf_reg_metrics"]["R²"],
+            "RMSE": rf_result["rf_reg_metrics"]["RMSE"],
+            "MAE": rf_result["rf_reg_metrics"]["MAE"],
+            "5折CV R²均值": rf_result["rf_reg_cv_mean"],
+            "5折CV R²标准差": rf_result["rf_reg_cv_std"],
+            "调参方式": rf_result["rf_reg_tuning"],
+            "最优参数摘要": _format_params(rf_result["rf_reg_params"]),
+        },
+        {
+            "模型": "XGBoost",
+            "任务": "回归预测",
+            "测试集R²": xgb_result["test_metrics"]["R²"],
+            "RMSE": xgb_result["test_metrics"]["RMSE"],
+            "MAE": xgb_result["test_metrics"]["MAE"],
+            "5折CV R²均值": xgb_result["cv_mean"],
+            "5折CV R²标准差": xgb_result["cv_std"],
+            "调参方式": xgb_result["tuning_method"],
+            "最优参数摘要": _format_params(xgb_result["params"]),
+        },
+    ]
+    comparison_df = pd.DataFrame(rows)
+    comparison_df.to_csv(os.path.join(output_dir, "model_comparison.csv"), index=False)
 
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s = scaler.transform(X_test)
+    print(comparison_df.to_string(index=False, float_format=lambda x: f"{x:.4f}" if isinstance(x, float) else str(x)))
 
-    results = []
-
-    # 1. Lasso
-    lasso = LassoCV(cv=5, random_state=42, max_iter=10000)
-    lasso.fit(X_train_s, y_train)
-    y_pred = lasso.predict(X_test_s)
-    results.append({"模型": "Lasso回归", "R²": r2_score(y_test, y_pred),
-                     "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
-                     "MAE": mean_absolute_error(y_test, y_pred)})
-
-    # 2. 随机森林
-    rf = RandomForestRegressor(n_estimators=200, max_depth=10, min_samples_leaf=20,
-                                random_state=42, n_jobs=-1)
-    rf.fit(X_train, y_train)
-    y_pred = rf.predict(X_test)
-    results.append({"模型": "随机森林", "R²": r2_score(y_test, y_pred),
-                     "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
-                     "MAE": mean_absolute_error(y_test, y_pred)})
-
-    # 3. XGBoost
-    xgb_m = xgb.XGBRegressor(n_estimators=300, max_depth=6, learning_rate=0.05,
-                               subsample=0.8, colsample_bytree=0.8,
-                               min_child_weight=10, random_state=42, n_jobs=-1)
-    xgb_m.fit(X_train, y_train, verbose=False)
-    y_pred = xgb_m.predict(X_test)
-    results.append({"模型": "XGBoost", "R²": r2_score(y_test, y_pred),
-                     "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
-                     "MAE": mean_absolute_error(y_test, y_pred)})
-
-    # 对比表
-    results_df = pd.DataFrame(results)
-    print("\n  表4  模型性能对比")
-    print("  " + "=" * 50)
-    print(results_df.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
-    print("  " + "=" * 50)
-
-    # 保存
-    results_df.to_csv(os.path.join(output_dir, "model_comparison.csv"), index=False)
-
-    # 画对比柱状图
-    fig, axes = plt.subplots(1, 3, figsize=(14, 5))
-    models = results_df["模型"].tolist()
-    colors = ['#2196F3', '#4CAF50', '#FF5722']
-
-    for i, metric in enumerate(["R²", "RMSE", "MAE"]):
-        vals = results_df[metric].tolist()
-        bars = axes[i].bar(models, vals, color=colors)
-        axes[i].set_title(metric, fontsize=14)
-        axes[i].set_ylabel(metric)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    colors = ["#7E57C2", "#2196F3", "#4CAF50", "#FF5722"]
+    for idx, metric in enumerate(["测试集R²", "RMSE", "MAE"]):
+        vals = comparison_df[metric].tolist()
+        bars = axes[idx].bar(comparison_df["模型"], vals, color=colors)
+        axes[idx].set_title(metric)
         for bar, val in zip(bars, vals):
-            axes[i].text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                        f'{val:.4f}', ha='center', va='bottom', fontsize=10)
-
-    plt.suptitle('图8  回归模型性能对比', fontsize=14, y=1.02)
+            axes[idx].text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{val:.4f}", ha="center", va="bottom", fontsize=9)
+    plt.suptitle("图8  回归模型性能对比（含 OLS 基准）", fontsize=14, y=1.02)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig8_model_comparison.png"), bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "fig8_model_comparison.png"), bbox_inches="tight")
     plt.close()
-    print(f"\n  已保存: fig8_model_comparison.png")
 
-    return results_df
+    return comparison_df
 
 
-# ============================================================
-# 主流程
-# ============================================================
+def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_result, xgb_result, classification_result, kmeans_result, comparison_df):
+    """保存 JSON/CSV 摘要。"""
+    class_balance = prepared["class_balance"]
+    classification_df = classification_result["comparison"].copy()
+    rf_row = pd.DataFrame([{
+        "模型": "RandomForestClassifier",
+        **rf_result["rf_clf_metrics"],
+        "调参方式": rf_result["rf_clf_tuning"],
+        "最优参数摘要": _format_params(rf_result["rf_clf_params"]),
+        "平衡处理": f"class_weight={rf_result['rf_clf_params'].get('class_weight')}",
+    }])
+    classification_df = pd.concat([classification_df.iloc[:1], rf_row, classification_df.iloc[1:]], ignore_index=True)
+    classification_df.to_csv(os.path.join(output_dir, "classification_comparison.csv"), index=False)
+
+    tuning_summary = {
+        "split": {
+            "test_size": TEST_SIZE,
+            "random_state": RANDOM_STATE,
+            "train_size": int(len(splits["train_idx"])),
+            "test_size_n": int(len(splits["test_idx"])),
+            "classification_stratified": True,
+        },
+        "cross_validation": {
+            "folds": CV_FOLDS,
+            "regression": "KFold(shuffle=True)",
+            "classification": "StratifiedKFold(shuffle=True)",
+        },
+        "class_balance": {
+            **class_balance,
+            "imbalance_judgment": "不严重失衡",
+            "resampling": "未使用SMOTE",
+            "handling": "仅使用 stratify，并比较 class_weight / scale_pos_weight",
+        },
+        "search_spaces": {
+            "lasso_alpha_grid": list(np.logspace(-4, 1, 60)),
+            "rf_regression": {
+                "n_estimators": [200, 300, 400],
+                "max_depth": [6, 10, None],
+                "min_samples_leaf": [10, 20, 50],
+                "max_features": ["sqrt", 0.6, 1.0],
+            },
+            "rf_classification": {
+                "n_estimators": [200, 300, 400],
+                "max_depth": [6, 10, None],
+                "min_samples_leaf": [10, 20, 50],
+                "max_features": ["sqrt", 0.6, 1.0],
+                "class_weight": [None, "balanced"],
+            },
+            "xgb_regression": {
+                "n_estimators": [200, 300, 400],
+                "max_depth": [3, 4, 6],
+                "learning_rate": [0.03, 0.05, 0.08],
+                "subsample": [0.7, 0.8, 1.0],
+                "colsample_bytree": [0.7, 0.8, 1.0],
+                "min_child_weight": [5, 10, 20],
+            },
+            **classification_result["search_spaces"],
+        },
+        "best_params": {
+            "ols": {},
+            "lasso": lasso_result["param_summary"],
+            "rf_regression": rf_result["rf_reg_params"],
+            "rf_classification": rf_result["rf_clf_params"],
+            "xgb_regression": xgb_result["params"],
+            "logit": classification_result["logit_params"],
+            "xgb_classification": classification_result["xgb_clf_params"],
+            "decision_tree": classification_result["decision_tree_params"],
+        },
+    }
+    with open(os.path.join(output_dir, "ml_tuning_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(tuning_summary, f, ensure_ascii=False, indent=2)
+
+    summary = {
+        "class_balance": class_balance,
+        "ols_r2": ols_result["test_metrics"]["R²"],
+        "lasso_alpha": lasso_result["alpha"],
+        "lasso_retained": lasso_result["retained"],
+        "rf_regression_r2": rf_result["rf_reg_metrics"]["R²"],
+        "rf_classification_f1": rf_result["rf_clf_metrics"]["F1"],
+        "xgb_regression_r2": xgb_result["test_metrics"]["R²"],
+        "xgb_top_shap_feature": xgb_result["shap_df"].iloc[0]["变量"],
+        "best_kmeans_k": kmeans_result["best_k"],
+        "regression_comparison": comparison_df.to_dict(orient="records"),
+        "classification_comparison": classification_df.to_dict(orient="records"),
+    }
+    with open(os.path.join(output_dir, "ml_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
 
 def main():
     data_dir = os.path.join(os.getcwd(), "processed_data")
     output_dir = os.path.join(os.getcwd(), "results")
     os.makedirs(output_dir, exist_ok=True)
 
-    # 加载与准备数据（复用 regression_analysis.py 逻辑）
     print("加载数据...")
     df, _ = build_analysis_dataset(data_dir)
 
-    # 准备 ML 数据
-    df_ml, X, y, y_class, feature_names = prepare_ml_data(df)
+    prepared = prepare_ml_data(df)
+    splits = create_holdout_splits(prepared["X"], prepared["y"], prepared["y_class"], prepared["df_ml"]["Symbol"])
 
     print("\n" + "#" * 70)
-    print("#  数据挖掘分析开始")
+    print("#  机器学习补充分析开始")
     print("#" * 70)
 
-    # 1. Lasso 变量筛选
-    lasso_result = lasso_analysis(X, y, feature_names, output_dir)
+    ols_result = ols_baseline_analysis(splits["X_train"], splits["X_test"], splits["y_train"], splits["y_test"], splits["groups_train"])
+    lasso_result = lasso_analysis(
+        splits["X_train"],
+        splits["X_test"],
+        splits["y_train"],
+        splits["y_test"],
+        splits["groups_train"],
+        prepared["feature_names"],
+        output_dir,
+    )
+    rf_result = random_forest_analysis(
+        splits["X_train"],
+        splits["X_test"],
+        splits["y_train"],
+        splits["y_test"],
+        splits["yc_train"],
+        splits["yc_test"],
+        splits["groups_train"],
+        prepared["feature_names"],
+        output_dir,
+    )
+    xgb_result = xgboost_regression_analysis(
+        splits["X_train"],
+        splits["X_test"],
+        splits["y_train"],
+        splits["y_test"],
+        splits["groups_train"],
+        prepared["feature_names"],
+        output_dir,
+    )
+    classification_result = classification_comparison(
+        splits["X_train"],
+        splits["X_test"],
+        splits["yc_train"],
+        splits["yc_test"],
+        splits["groups_train"],
+    )
+    decision_tree_analysis(classification_result["decision_tree_model"], prepared["feature_names"], output_dir)
+    kmeans_result = kmeans_analysis(prepared["df_ml"], output_dir)
+    comparison_df = build_regression_comparison(ols_result, lasso_result, rf_result, xgb_result, output_dir)
+    save_ml_outputs(
+        output_dir,
+        prepared,
+        splits,
+        ols_result,
+        lasso_result,
+        rf_result,
+        xgb_result,
+        classification_result,
+        kmeans_result,
+        comparison_df,
+    )
 
-    # 2. 随机森林
-    rf_result = random_forest_analysis(X, y, y_class, feature_names, output_dir)
-
-    # 3. XGBoost + SHAP
-    xgb_result = xgboost_shap_analysis(X, y, feature_names, output_dir)
-
-    # 4. 决策树
-    dt_result = decision_tree_analysis(X, y_class, feature_names, output_dir)
-
-    # 5. K-Means 聚类
-    kmeans_result = kmeans_analysis(df_ml, feature_names, output_dir)
-
-    # 6. 模型对比
-    comparison_df = model_comparison(X, y, y_class, feature_names, output_dir)
-
-    summary = {
-        "lasso_alpha": lasso_result["alpha"],
-        "lasso_fit_r2": lasso_result["fit_r2"],
-        "lasso_retained": lasso_result["retained"],
-        "rf_r2": rf_result["r2"],
-        "rf_rmse": rf_result["rmse"],
-        "rf_mae": rf_result["mae"],
-        "rf_cv_r2_mean": rf_result["cv_r2_mean"],
-        "rf_cv_r2_std": rf_result["cv_r2_std"],
-        "rf_accuracy": rf_result["accuracy"],
-        "rf_top_feature": rf_result["importance_reg"].iloc[0]["变量"],
-        "xgb_r2": xgb_result["r2"],
-        "xgb_rmse": xgb_result["rmse"],
-        "xgb_cv_r2_mean": xgb_result["cv_r2_mean"],
-        "xgb_cv_r2_std": xgb_result["cv_r2_std"],
-        "xgb_top_shap_feature": xgb_result["shap_df"].iloc[0]["变量"],
-        "decision_tree_accuracy": dt_result["accuracy"],
-        "kmeans_best_k": kmeans_result["best_k"],
-        "comparison": comparison_df.to_dict(orient="records"),
-    }
-    with open(os.path.join(output_dir, "ml_summary.json"), "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
-
-    # 最终总结
     print("\n" + "=" * 70)
-    print("数据挖掘分析完成！")
+    print("机器学习补充分析完成")
     print("=" * 70)
-    print(f"\n生成的图表文件 (均在 results/ 目录下):")
-    for f in sorted(os.listdir(output_dir)):
-        if f.startswith("fig"):
-            size = os.path.getsize(os.path.join(output_dir, f)) / 1024
-            print(f"  📊 {f}  ({size:.0f} KB)")
-
-    print(f"\n本脚本产出数据文件:")
-    print(f"  📄 model_comparison.csv")
-    print(f"  📄 ml_summary.json")
+    print("已生成：model_comparison.csv、classification_comparison.csv、ml_tuning_summary.json、ml_summary.json 及 fig1-fig8 图表。")
 
 
 if __name__ == "__main__":

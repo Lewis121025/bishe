@@ -187,7 +187,7 @@ def build_desc_table_docx(doc, df):
         "Top3Salary": "高管前三名薪酬总额",
         "SubsidyAmount": "政府补助",
         "Overpay": "超额薪酬(Overpay)",
-        "Power": "管理层权力(Power)",
+        "Power": "管理层权力(Power, FA)",
         "Roa": "资产收益率(Roa)",
         "Revenue": "营业收入",
         "Lever": "财务杠杆(Lever)",
@@ -218,6 +218,52 @@ def build_desc_table_docx(doc, df):
 
     apply_three_line_style(table, header_rows=1)
     add_table_note(doc, "注：薪酬和政府补助单位为元，连续变量已进行1%/99%缩尾处理。")
+
+
+def build_first_stage_table_docx(doc, df):
+    """表2 第一阶段期望薪酬模型。"""
+    core_vars = ["lnSale", "Roa", "IA", "Zone"]
+    model, n = fit_model(df, "lnCEOpay", core_vars)
+
+    explanations = {
+        "lnSale": "企业规模越大，期望薪酬越高",
+        "Roa": "盈利能力越强，期望薪酬越高",
+        "IA": "无形资产占比较高时，期望薪酬相对较低",
+        "Zone": "中西部地区样本的期望薪酬相对较低",
+    }
+    display_vars = ["lnSale", "Roa", "IA", "Zone"]
+
+    add_table_title(doc, "表2  第一阶段期望薪酬模型估计结果")
+    table = doc.add_table(rows=1 + len(display_vars) + 4, cols=4)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    headers = ["变量", "系数", "t值", "说明"]
+    for i, header in enumerate(headers):
+        set_cell_text(table.cell(0, i), header, bold=True)
+
+    row_idx = 1
+    for var in display_vars:
+        set_cell_text(table.cell(row_idx, 0), var, alignment=WD_ALIGN_PARAGRAPH.LEFT)
+        set_cell_text(table.cell(row_idx, 1), format_coef(model.params[var], model.pvalues[var]) if model else "—")
+        set_cell_text(table.cell(row_idx, 2), format_tval(model.tvalues[var]) if model else "")
+        set_cell_text(table.cell(row_idx, 3), explanations[var], alignment=WD_ALIGN_PARAGRAPH.LEFT)
+        row_idx += 1
+
+    tail_rows = [
+        ("Industry FE", "控制", "", "17 个行业虚拟变量"),
+        ("Year FE", "控制", "", "21 个年份虚拟变量"),
+        ("N", str(n), "", "—"),
+        ("R²", f"{model.rsquared:.4f}" if model else "—", "", "—"),
+    ]
+    for label, value, extra, note in tail_rows:
+        set_cell_text(table.cell(row_idx, 0), label, alignment=WD_ALIGN_PARAGRAPH.LEFT)
+        set_cell_text(table.cell(row_idx, 1), value)
+        set_cell_text(table.cell(row_idx, 2), extra)
+        set_cell_text(table.cell(row_idx, 3), note, alignment=WD_ALIGN_PARAGRAPH.LEFT)
+        row_idx += 1
+
+    apply_three_line_style(table, header_rows=1)
+    add_table_note(doc, "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。该模型用于估计正常薪酬水平，并据此构造超额薪酬 Overpay。标准误为公司层面聚类稳健标准误。")
 
 
 def _add_regression_table(doc, title, col_headers, sub_headers, display_vars, models_data, note, extra_rows=None):
@@ -297,7 +343,7 @@ def _add_regression_table(doc, title, col_headers, sub_headers, display_vars, mo
 
 
 def build_main_table_docx(doc, df):
-    """表2 主回归（统一样本）"""
+    """表3 主回归（统一样本）"""
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
     all_needed = ["lnSubsidy", "Power"] + control_vars + ["Overpay", "IndustrySector"]
     df_unified = df.dropna(subset=all_needed).copy()
@@ -311,12 +357,12 @@ def build_main_table_docx(doc, df):
 
     _add_regression_table(
         doc,
-        "表2  政府补助、管理层权力与高管超额薪酬的回归结果",
+        "表3  政府补助、管理层权力与高管超额薪酬的回归结果（修订后主测度：Power 为 FA）",
         ["模型(3)", "模型(4)", "模型(5)"],
-        ["Overpay", "Overpay", "Power"],
+        ["Overpay", "Overpay", "Power(FA)"],
         display_vars,
         [(m3, n3), (m4, n4), (m5, n5)],
-        "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。标准误为公司层面聚类稳健标准误。",
+        "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。Power 为因子分析（FA）构造的修订后主测度；PCA 结果作为上一版原始方案对照另行报告。标准误为公司层面聚类稳健标准误。",
         extra_rows=[
             ("Industry FE", fe),
             ("Year FE", fe),
@@ -325,9 +371,9 @@ def build_main_table_docx(doc, df):
 
 
 def build_mediation_table_docx(doc, df):
-    """表3 全样本中介效应检验。"""
+    """表4 全样本中介效应检验。"""
     summary = df["summary"] if isinstance(df, dict) else run_regressions(df)["summary"]
-    add_table_title(doc, "表3  管理层权力中介效应检验（全样本）")
+    add_table_title(doc, "表4  管理层权力中介效应检验（全样本，修订后主测度：Power 为 FA）")
 
     rows = [
         ("lnSubsidy → Overpay（总效应 c）", f"{summary['coef_c']:.4f}", format_pval(summary["p_c"])),
@@ -336,9 +382,11 @@ def build_mediation_table_docx(doc, df):
         ("lnSubsidy → Overpay（直接效应 c'）", f"{summary['coef_c_prime']:.4f}", format_pval(summary["p_c_prime"])),
         ("间接效应（a×b）", f"{summary['indirect_effect']:.6f}", "—"),
         ("Sobel Z", f"{summary['sobel_z']:.4f}", "—"),
-        ("Sobel p", f"{summary['sobel_p']:.4f}", "—"),
+        ("Sobel p", format_pval(summary["sobel_p"]), summary["sobel_signal"]),
         ("Bootstrap p", format_pval(summary["bootstrap_p"]), "—"),
         ("Bootstrap 95%CI", f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}]", "—"),
+        ("路径a显著", "是" if summary["path_a_significant"] else "否", "—"),
+        ("路径b显著", "是" if summary["path_b_significant"] else "否", "—"),
         ("中介效应占比(%)", f"{summary['mediation_ratio_pct']:.2f}", "—"),
     ]
 
@@ -355,9 +403,33 @@ def build_mediation_table_docx(doc, df):
     apply_three_line_style(table, header_rows=1)
     add_table_note(
         doc,
-        f"注：原始结论为“{summary['conclusion']}”，严格口径为“{summary['rigor_conclusion']}”；"
-        f"cluster bootstrap 次数={summary['bootstrap_reps']}。"
+        f"注：中介类型为“{summary['mediation_type']}”；仅当路径a、路径b均显著、间接效应方向与总效应一致且 bootstrap 95%CI 不含0时，才认定为常规中介效应。PCA 原始方案对照与熵值法稳健性结果另行比较报告。"
     )
+
+
+def build_power_method_comparison_table_docx(doc, main_results):
+    """表5 Power 不同构造口径比较。"""
+    method_df = main_results["method_comparison"].copy()
+    add_table_title(doc, "表5  `Power` 不同构造口径下的全样本中介结果比较")
+
+    table = doc.add_table(rows=1 + len(method_df), cols=5)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    headers = ["方法", "角色", "路径b", "bootstrap 95%CI", "结论"]
+    for i, header in enumerate(headers):
+        set_cell_text(table.cell(0, i), header, bold=True)
+
+    for row_idx, (_, row) in enumerate(method_df.iterrows(), start=1):
+        set_cell_text(table.cell(row_idx, 0), row["method"])
+        set_cell_text(table.cell(row_idx, 1), row["role"])
+        set_cell_text(table.cell(row_idx, 2), format_coef(row["coef_b"], row["p_b"]))
+        set_cell_text(
+            table.cell(row_idx, 3),
+            f"[{row['bootstrap_ci_lower']:.6f}, {row['bootstrap_ci_upper']:.6f}]"
+        )
+        set_cell_text(table.cell(row_idx, 4), row["mediation_type"], alignment=WD_ALIGN_PARAGRAPH.LEFT)
+
+    apply_three_line_style(table, header_rows=1)
+    add_table_note(doc, "注：FA 为修订后主测度，PCA 为上一版原始方案对照，熵值法为稳健性替代。bootstrap 95%CI 为公司层面 cluster bootstrap（300 次）得到的 95% 置信区间。")
 
 
 def build_subsample_table_docx(doc, df, title, group_specs):
@@ -390,7 +462,7 @@ def build_subsample_table_docx(doc, df, title, group_specs):
 def build_grouped_mediation_table_docx(doc, df):
     """附表A 分组中介效应汇总。"""
     summary_df = df if hasattr(df, "columns") else grouped_mediation_analysis(df)
-    add_table_title(doc, "附表A  分组中介效应汇总（含分层FDR与bootstrap复核）")
+    add_table_title(doc, "附表A  分组中介效应汇总（FA 修订后主测度，含分层FDR与bootstrap复核）")
 
     cols = [
         ("层级", "layer"),
@@ -401,7 +473,9 @@ def build_grouped_mediation_table_docx(doc, df):
         ("路径b", "coef_b"),
         ("原始Sobel_p", "sobel_p"),
         ("FDR_p", "fdr_p"),
-        ("严格口径", "rigor_conclusion"),
+        ("路径b显著", "path_b_significant"),
+        ("中介类型", "mediation_type"),
+        ("严谨口径", "group_evidence_level"),
     ]
     table = doc.add_table(rows=1 + len(summary_df), cols=len(cols))
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -415,17 +489,19 @@ def build_grouped_mediation_table_docx(doc, df):
                 text = f"{value:.4f}"
             elif key in {"sobel_p", "fdr_p"}:
                 text = format_pval(value)
+            elif key == "path_b_significant":
+                text = "是" if bool(value) else "否"
             else:
                 text = str(value)
-            align = WD_ALIGN_PARAGRAPH.LEFT if key in {"layer", "group", "rigor_conclusion"} else WD_ALIGN_PARAGRAPH.CENTER
+            align = WD_ALIGN_PARAGRAPH.LEFT if key in {"layer", "group", "mediation_type", "group_evidence_level"} else WD_ALIGN_PARAGRAPH.CENTER
             set_cell_text(table.cell(row_idx, col_idx), text, alignment=align, font_size=9.5)
 
     apply_three_line_style(table, header_rows=1)
-    add_table_note(doc, "注：FDR 为在“产权直分”“补充分组”两个层级内分别进行的 BH 校正；bootstrap 仅对原始 Sobel p<0.10 的分组执行。")
+    add_table_note(doc, "注：FDR 为在“产权直分”“补充分组”两个层级内分别进行的 BH 校正；bootstrap 仅对原始 Sobel p<0.10 的分组执行。严谨口径在中介类型基础上进一步要求通过相应层内 FDR，未通过者仅可谨慎解释。")
 
 
 def build_robustness_table_docx(doc, df):
-    """表6 稳健性检验"""
+    """表9 稳健性检验"""
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
     core_vars = ["lnSubsidy"] + control_vars
 
@@ -465,7 +541,7 @@ def build_robustness_table_docx(doc, df):
     checks.append(("(6) 滞后一期", "Overpay", m6, n6, "lnSubsidy_l1"))
 
     # 构建表格
-    add_table_title(doc, "表7  稳健性检验结果")
+    add_table_title(doc, "表9  稳健性检验结果")
     n_checks = len(checks)
     # 行：表头2 + 系数1 + t值1 + Controls + Industry FE + Year FE + N + R² = 9
     table = doc.add_table(rows=9, cols=1 + n_checks)
@@ -554,37 +630,43 @@ def main():
     print("  生成表1 描述性统计...")
     build_desc_table_docx(doc, df)
 
-    print("  生成表2 主回归...")
+    print("  生成表2 第一阶段期望薪酬模型...")
+    build_first_stage_table_docx(doc, df)
+
+    print("  生成表3 主回归...")
     build_main_table_docx(doc, df)
 
-    print("  生成表3 中介效应...")
+    print("  生成表4 中介效应...")
     build_mediation_table_docx(doc, main_results)
+
+    print("  生成表5 Power 构造比较...")
+    build_power_method_comparison_table_docx(doc, main_results)
 
     soe_df = df[df["IsSOE"] == 1].copy()
     identified_ratio = soe_df["IsCentralSOE"].notna().mean() if len(soe_df) > 0 else np.nan
 
-    print("  生成表4 分产权性质...")
+    print("  生成表6 分产权性质...")
     build_subsample_table_docx(
         doc, df,
-        "表4  分产权性质回归结果",
+        "表6  分产权性质回归结果",
         [("国有", df["IsSOE"] == 1), ("私营", df["IsPrivate"] == 1)],
     )
 
-    print("  生成表5 分行业管制...")
+    print("  生成表7 分行业管制...")
     build_subsample_table_docx(
         doc, df,
-        "表5  分行业管制回归结果",
+        "表7  分行业管制回归结果",
         [("管制行业", df["RegulatedIndustry"] == 1), ("非管制行业", df["RegulatedIndustry"] == 0)],
     )
 
-    print("  生成表6 央企vs地方国企...")
+    print("  生成表8 央企vs地方国企...")
     build_subsample_table_docx(
         doc, df,
-        f"表6  央企与地方国企回归结果（央地可识别比例={identified_ratio:.2%}）",
+        f"表8  央企与地方国企回归结果（央地可识别比例={identified_ratio:.2%}）",
         [("央企", df["IsCentralSOE"] == 1), ("地方国企", df["IsCentralSOE"] == 0)],
     )
 
-    print("  生成表7 稳健性检验...")
+    print("  生成表9 稳健性检验...")
     build_robustness_table_docx(doc, df)
 
     print("  生成附表A 分组中介效应汇总...")

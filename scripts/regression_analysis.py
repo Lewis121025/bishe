@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from scipy import stats
+from statsmodels.multivariate.factor import Factor
 from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from sklearn.preprocessing import StandardScaler
@@ -77,15 +78,15 @@ def _format_pvalue(pvalue):
     return f"{pvalue:.4f}"
 
 
-def _classify_mediation_pvalue(pvalue):
-    """按统一阈值给出中介效应判定。"""
+def _classify_pvalue_signal(pvalue):
+    """按统一阈值给出显著性信号标签。"""
     if pd.isna(pvalue):
         return "无法判定"
     if pvalue < 0.05:
-        return "存在中介效应"
+        return "显著"
     if pvalue < 0.10:
-        return "边际中介效应"
-    return "不存在中介效应"
+        return "边际显著"
+    return "不显著"
 
 
 def _stable_seed_from_text(label, base_seed=BOOTSTRAP_RANDOM_SEED):
@@ -93,7 +94,23 @@ def _stable_seed_from_text(label, base_seed=BOOTSTRAP_RANDOM_SEED):
     return int(base_seed + sum((idx + 1) * ord(ch) for idx, ch in enumerate(str(label))))
 
 
-def _cluster_bootstrap_indirect_effect(x4, y_overpay, x5, y_power, groups, reps, seed):
+def _ci_excludes_zero(lower, upper):
+    """判断置信区间是否排除 0。"""
+    if pd.isna(lower) or pd.isna(upper):
+        return False
+    return lower > 0 or upper < 0
+
+
+def _effect_direction_consistent(total_effect, indirect_effect):
+    """判断间接效应方向是否与总效应一致。"""
+    if pd.isna(total_effect) or pd.isna(indirect_effect):
+        return False
+    if np.isclose(total_effect, 0.0) or np.isclose(indirect_effect, 0.0):
+        return False
+    return bool(total_effect * indirect_effect > 0)
+
+
+def _cluster_bootstrap_indirect_effect(x4, y_overpay, x5, y_power, groups, reps, seed, mediator_col="Power"):
     """公司层面 cluster bootstrap 估计间接效应 a×b 的分布。"""
     if reps <= 0:
         return {
@@ -111,7 +128,7 @@ def _cluster_bootstrap_indirect_effect(x4, y_overpay, x5, y_power, groups, reps,
     y_power_array = np.asarray(y_power, dtype=float)
     group_array = pd.Series(groups).astype(str).to_numpy()
 
-    power_idx = x4.columns.get_loc("Power")
+    power_idx = x4.columns.get_loc(mediator_col)
     subsidy_idx = x5.columns.get_loc("lnSubsidy")
 
     unique_groups = pd.unique(group_array)
@@ -165,33 +182,47 @@ def _cluster_bootstrap_indirect_effect(x4, y_overpay, x5, y_power, groups, reps,
     }
 
 
-def _derive_rigor_conclusion(summary):
-    """综合原始 Sobel、FDR 和 bootstrap 给出更谨慎的研究结论。"""
-    bootstrap_supported = summary.get("bootstrap_conclusion") == "95%CI不含0"
+def _classify_mediation_type(summary):
+    """按学术严谨性区分常规中介、弱中介/遮掩效应线索和不支持。"""
+    path_a_sig = bool(summary.get("path_a_significant", False))
+    path_b_sig = bool(summary.get("path_b_significant", False))
+    direction_consistent = bool(summary.get("indirect_direction_consistent", False))
+    bootstrap_supported = _ci_excludes_zero(
+        summary.get("bootstrap_ci_lower", np.nan),
+        summary.get("bootstrap_ci_upper", np.nan),
+    )
+    if path_a_sig and path_b_sig and bootstrap_supported and direction_consistent:
+        return "常规中介效应"
+    if bootstrap_supported and not (path_a_sig and path_b_sig):
+        return "弱中介/遮掩效应线索"
+    if bootstrap_supported and not direction_consistent:
+        return "弱中介/遮掩效应线索"
+    return "不支持中介效应"
+
+
+def _classify_group_evidence(summary):
+    """结合 FDR 给出分组结果的严谨口径。"""
+    mediation_type = summary.get("mediation_type", "未评估")
     fdr_p = summary.get("fdr_p", np.nan)
-    sobel_p = summary.get("sobel_p", np.nan)
 
-    if pd.notna(fdr_p):
-        if fdr_p < 0.05 and bootstrap_supported:
-            return "校正后稳健支持"
-        if fdr_p < 0.10 and bootstrap_supported:
-            return "探索性稳健支持"
-        if sobel_p < 0.10:
-            return "仅原始Sobel支持"
-        return "无稳健证据"
-
-    if sobel_p < 0.05 and bootstrap_supported:
-        return "稳健支持"
-    if sobel_p < 0.10:
-        return "仅原始Sobel支持"
-    return "无稳健证据"
+    if mediation_type == "常规中介效应":
+        if pd.isna(fdr_p):
+            return "常规中介效应"
+        if fdr_p < 0.05:
+            return "通过FDR的常规中介证据"
+        if fdr_p < 0.10:
+            return "边际通过FDR的常规中介证据"
+        return "未通过FDR校正，谨慎解释"
+    if mediation_type == "弱中介/遮掩效应线索":
+        return "弱中介/遮掩效应线索"
+    return "不支持中介效应"
 
 
 def _apply_layerwise_fdr(summary_df):
     """按层级分别进行 BH-FDR 校正。"""
     result_df = summary_df.copy()
     result_df["fdr_p"] = np.nan
-    result_df["fdr_conclusion"] = "不适用"
+    result_df["fdr_signal"] = "不适用"
 
     for layer, idx in result_df.groupby("layer").groups.items():
         idx = list(idx)
@@ -202,8 +233,8 @@ def _apply_layerwise_fdr(summary_df):
             adjusted_valid = multipletests(pvals[valid_mask], method="fdr_bh")[1]
             adjusted[valid_mask] = adjusted_valid
         result_df.loc[idx, "fdr_p"] = adjusted
-        result_df.loc[idx, "fdr_conclusion"] = [
-            _classify_mediation_pvalue(value) if np.isfinite(value) else "无法判定"
+        result_df.loc[idx, "fdr_signal"] = [
+            _classify_pvalue_signal(value) if np.isfinite(value) else "无法判定"
             for value in adjusted
         ]
 
@@ -624,16 +655,16 @@ def compute_overpay(df):
 
 
 # ============================================================
-# 第五部分：管理层权力 Power (PCA主成分分析)
+# 第五部分：管理层权力 Power（FA 修订后主测度，熵值法稳健性替代，PCA 原始方案对照）
 # ============================================================
 
-def _calc_pca_diagnostics(df_complete, power_vars):
-    """计算 KMO、Bartlett 球形检验和 PCA 方差贡献率。"""
-    corr = np.corrcoef(df_complete[power_vars].astype(float), rowvar=False)
-    inv_corr = np.linalg.inv(corr)
+def _calc_shared_factor_diagnostics(df_complete, power_vars):
+    """计算 KMO、Bartlett 球形检验及相关矩阵诊断。"""
+    standardized = df_complete[power_vars].astype(float)
+    corr = np.corrcoef(standardized, rowvar=False)
+    inv_corr = np.linalg.pinv(corr)
 
-    # Partial correlation matrix
-    scale = np.diag(1 / np.sqrt(np.diag(inv_corr)))
+    scale = np.diag(1 / np.sqrt(np.clip(np.diag(inv_corr), 1e-12, None)))
     partial_corr = -scale @ inv_corr @ scale
     np.fill_diagonal(partial_corr, 0)
 
@@ -651,11 +682,11 @@ def _calc_pca_diagnostics(df_complete, power_vars):
 
     n_obs = len(df_complete)
     n_var = len(power_vars)
-    chi_square = -(n_obs - 1 - (2 * n_var + 5) / 6) * np.log(np.linalg.det(corr))
+    det_corr = max(float(np.linalg.det(corr)), np.finfo(float).tiny)
+    chi_square = -(n_obs - 1 - (2 * n_var + 5) / 6) * np.log(det_corr)
     dof = n_var * (n_var - 1) / 2
     bartlett_p = 1 - stats.chi2.cdf(chi_square, dof)
 
-    standardized = (df_complete[power_vars] - df_complete[power_vars].mean()) / df_complete[power_vars].std(ddof=0)
     eigvals = np.linalg.eigvalsh(np.cov(standardized, rowvar=False))[::-1]
     explained = eigvals / eigvals.sum()
 
@@ -672,73 +703,172 @@ def _calc_pca_diagnostics(df_complete, power_vars):
     }
 
 
+def _orient_power_scores(scores, standardized_df):
+    """统一得分方向：数值越大表示管理层权力越强。"""
+    reference = standardized_df.mean(axis=1).to_numpy(dtype=float)
+    if np.std(scores) < 1e-12 or np.std(reference) < 1e-12:
+        return scores, 1.0
+    corr = np.corrcoef(scores, reference)[0, 1]
+    sign = -1.0 if np.isfinite(corr) and corr < 0 else 1.0
+    return scores * sign, sign
+
+
+def _standardize_power_inputs(df_complete, power_vars):
+    """标准化管理层权力分指标。"""
+    scaler = StandardScaler()
+    standardized = pd.DataFrame(
+        scaler.fit_transform(df_complete[power_vars]),
+        columns=power_vars,
+        index=df_complete.index,
+    )
+    return standardized
+
+
+def _compute_pca_power(standardized_df, power_vars):
+    """PCA 对照口径。"""
+    pca = PCA(n_components=1)
+    raw_scores = pca.fit_transform(standardized_df).flatten()
+    scores, sign = _orient_power_scores(raw_scores, standardized_df)
+    loadings = pca.components_[0] * sign
+    return {
+        "scores": pd.Series(scores, index=standardized_df.index),
+        "loadings": {var: float(val) for var, val in zip(power_vars, loadings)},
+        "explained_variance_ratio_pc1": float(pca.explained_variance_ratio_[0]),
+        "cum_explained_variance_pc2": float(np.sum(pca.explained_variance_ratio_[:2])),
+        "cum_explained_variance_pc3": float(np.sum(pca.explained_variance_ratio_[:3])),
+    }
+
+
+def _compute_fa_power(standardized_df, power_vars):
+    """因子分析主口径。"""
+    fa_result = Factor(standardized_df.to_numpy(), n_factor=1, method="pa").fit()
+    loadings = np.asarray(fa_result.loadings).flatten()
+    score_weights = np.asarray(fa_result.factor_score_params()).flatten()
+    raw_scores = standardized_df.to_numpy() @ score_weights
+    scores, sign = _orient_power_scores(raw_scores, standardized_df)
+    loadings = loadings * sign
+    score_weights = score_weights * sign
+    ss_loading = float(np.sum(loadings ** 2))
+    variance_ratio = ss_loading / len(power_vars)
+    return {
+        "scores": pd.Series(scores, index=standardized_df.index),
+        "loadings": {var: float(val) for var, val in zip(power_vars, loadings)},
+        "score_weights": {var: float(val) for var, val in zip(power_vars, score_weights)},
+        "communalities": {var: float(val) for var, val in zip(power_vars, fa_result.communality)},
+        "uniqueness": {var: float(val) for var, val in zip(power_vars, fa_result.uniqueness)},
+        "ss_loading": ss_loading,
+        "variance_explained_ratio": float(variance_ratio),
+    }
+
+
+def _compute_entropy_power(df_complete, power_vars):
+    """熵值法稳健性口径。"""
+    data = df_complete[power_vars].astype(float).copy()
+    min_vals = data.min(axis=0)
+    ranges = data.max(axis=0) - min_vals
+    ranges = ranges.replace(0, 1.0)
+    normalized = (data - min_vals) / ranges
+    normalized = normalized.clip(lower=0)
+
+    eps = 1e-12
+    prob = normalized.div(np.clip(normalized.sum(axis=0), eps, None), axis=1)
+    k = 1.0 / np.log(len(normalized))
+    entropy = -(k * (prob * np.log(np.clip(prob, eps, None))).sum(axis=0))
+    divergence = 1 - entropy
+    if float(divergence.sum()) <= eps:
+        weights = pd.Series(np.repeat(1.0 / len(power_vars), len(power_vars)), index=power_vars)
+    else:
+        weights = divergence / divergence.sum()
+
+    score_raw = normalized.to_numpy() @ weights.to_numpy()
+    score_std = (score_raw - score_raw.mean()) / np.std(score_raw, ddof=0)
+    return {
+        "scores": pd.Series(score_std, index=df_complete.index),
+        "weights": {var: float(val) for var, val in weights.items()},
+        "entropy": {var: float(val) for var, val in entropy.items()},
+        "redundancy": {var: float(val) for var, val in divergence.items()},
+    }
+
+
 def compute_power(df, return_diagnostics=False):
     """
-    借鉴 Finkelstein(1992)、刘剑民(2019) 方法:
-    管理层权力 = PCA(Tenure, Dual, Boardsize, Insider, Mgshder)
+    管理层权力构造：
+      1. FA（因子分析）为修订后主测度
+      2. 熵值法为稳健性替代
+      3. PCA 保留为上一版原始方案对照，说明单一主成分代表性有限
     """
     print("\n" + "=" * 70)
-    print("第五部分：管理层权力综合指标 (Power - PCA)")
+    print("第五部分：管理层权力综合指标（FA修订后主测度，熵值法稳健性替代，PCA原始方案对照）")
     print("=" * 70)
 
     power_vars = ["Tenure", "Dual", "Boardsize", "Insider", "Mgshder"]
-
-    # 检查缺失情况
-    for v in power_vars:
-        missing = df[v].isna().sum()
+    for var in power_vars:
+        missing = df[var].isna().sum()
         total = len(df)
-        print(f"  {v}: 缺失 {missing} ({missing/total*100:.1f}%)")
+        print(f"  {var}: 缺失 {missing} ({missing / total * 100:.1f}%)")
 
-    df_pca = df.dropna(subset=power_vars).copy()
-    print(f"\n可用于 PCA 的样本量: {len(df_pca)}")
+    df_power = df.dropna(subset=power_vars).copy()
+    print(f"\n可用于 Power 构造的样本量: {len(df_power)}")
 
-    if len(df_pca) < 100:
-        print("  WARNING: 样本量过少，跳过 PCA。")
-        df["Power"] = np.nan
-        diagnostics = {
-            "n_obs": int(len(df_pca)),
-            "kmo_overall": np.nan,
-            "bartlett_chi2": np.nan,
-            "bartlett_df": np.nan,
-            "bartlett_p": np.nan,
-            "explained_variance_ratio_pc1": np.nan,
-            "cum_explained_variance_pc2": np.nan,
-            "cum_explained_variance_pc3": np.nan,
-            "kmo_per_var": {var: np.nan for var in power_vars},
-            "loadings": {var: np.nan for var in power_vars},
-        }
+    diagnostics = {
+        "power_vars": power_vars,
+        "main_method": "FA",
+        "main_power_col": "Power_FA",
+        "pca": {},
+        "fa": {},
+        "entropy": {},
+    }
+
+    if len(df_power) < 100:
+        print("  WARNING: 样本量过少，跳过 Power 构造。")
+        for col in ["Power", "Power_FA", "Power_PCA", "Power_entropy"]:
+            df[col] = np.nan
+        df.attrs["power_diagnostics"] = diagnostics
         return (df, diagnostics) if return_diagnostics else df
 
-    diagnostics = _calc_pca_diagnostics(df_pca, power_vars)
+    standardized = _standardize_power_inputs(df_power, power_vars)
+    shared_diag = _calc_shared_factor_diagnostics(standardized, power_vars)
+    pca_result = _compute_pca_power(standardized, power_vars)
+    fa_result = _compute_fa_power(standardized, power_vars)
+    entropy_result = _compute_entropy_power(df_power, power_vars)
 
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(df_pca[power_vars])
+    diagnostics["pca"] = {**shared_diag, **pca_result}
+    diagnostics["fa"] = {
+        **shared_diag,
+        **fa_result,
+        "average_communality": float(np.mean(list(fa_result["communalities"].values()))),
+    }
+    diagnostics["entropy"] = {
+        "n_obs": int(len(df_power)),
+        **entropy_result,
+    }
 
-    pca = PCA(n_components=1)
-    power_scores = pca.fit_transform(X_scaled)
-    loadings = {var: float(loading) for var, loading in zip(power_vars, pca.components_[0])}
-    diagnostics["loadings"] = loadings
-
-    print(f"\n  KMO = {diagnostics['kmo_overall']:.4f}")
+    print(f"\n  共同适用性检验: KMO = {shared_diag['kmo_overall']:.4f}")
     for var in power_vars:
-        print(f"    KMO[{var:10s}] = {diagnostics['kmo_per_var'][var]:.4f}")
+        print(f"    KMO[{var:10s}] = {shared_diag['kmo_per_var'][var]:.4f}")
     print(
-        f"  Bartlett 球形检验: Chi² = {diagnostics['bartlett_chi2']:.4f}, "
-        f"df = {diagnostics['bartlett_df']}, p = {_format_pvalue(diagnostics['bartlett_p'])}"
+        f"  Bartlett 球形检验: Chi² = {shared_diag['bartlett_chi2']:.4f}, "
+        f"df = {shared_diag['bartlett_df']}, p = {_format_pvalue(shared_diag['bartlett_p'])}"
     )
-    print(f"  第一主成分解释方差比: {diagnostics['explained_variance_ratio_pc1']:.4f}")
-    print(f"  前两主成分累计解释方差比: {diagnostics['cum_explained_variance_pc2']:.4f}")
-    print(f"  前三主成分累计解释方差比: {diagnostics['cum_explained_variance_pc3']:.4f}")
-    print("  各变量载荷:")
-    for var, loading in loadings.items():
-        print(f"    {var:15s}: {loading:.4f}")
+    print(f"\n  PCA 第一主成分方差贡献率 = {pca_result['explained_variance_ratio_pc1']:.4f}")
+    print("  解释：PCA 仅显示存在基本共同性，但单一主成分代表性有限，保留为上一版原始方案对照。")
+    print(f"\n  FA 单因子方差解释率 = {fa_result['variance_explained_ratio']:.4f}")
+    print(f"  FA 平均共同度 = {diagnostics['fa']['average_communality']:.4f}")
+    print("  解释：修订版以 FA 作为 Power 主测度，并以熵值法作为稳健性替代。")
 
-    df_pca["Power"] = power_scores.flatten()
+    score_df = pd.DataFrame({
+        "Symbol": df_power["Symbol"].to_numpy(),
+        "Year": df_power["Year"].to_numpy(),
+        "Power_PCA": pca_result["scores"].to_numpy(),
+        "Power_FA": fa_result["scores"].to_numpy(),
+        "Power_entropy": entropy_result["scores"].to_numpy(),
+    })
+    score_df["Power"] = score_df["Power_FA"]
 
-    df = df.merge(df_pca[["Symbol", "Year", "Power"]],
-                  on=["Symbol", "Year"], how="left")
+    df = df.merge(score_df, on=["Symbol", "Year"], how="left")
+    df.attrs["power_diagnostics"] = diagnostics
 
-    print(f"\n管理层权力 (Power) 描述:")
+    print(f"\n修订后主测度 Power（FA）描述:")
     print(df["Power"].describe().to_string())
 
     return (df, diagnostics) if return_diagnostics else df
@@ -779,15 +909,15 @@ def _print_core_results(model, core_vars, n_ind, n_year, sample_size, n_clusters
     print(f"R² = {model.rsquared:.4f}")
 
 
-def _summarize_mediation(label, m3, m4, m5, sample_size, n_clusters):
-    """汇总 Baron & Kenny 路径系数和 Sobel 检验结果。"""
+def _summarize_mediation(label, m3, m4, m5, sample_size, n_clusters, mediator_col="Power", mediator_method="FA"):
+    """汇总 Baron & Kenny 路径系数、Sobel 与 bootstrap 所需字段。"""
     coef_c = m3.params.get("lnSubsidy", np.nan)
     p_c = m3.pvalues.get("lnSubsidy", np.nan)
     coef_c_prime = m4.params.get("lnSubsidy", np.nan)
     p_c_prime = m4.pvalues.get("lnSubsidy", np.nan)
-    coef_b = m4.params.get("Power", np.nan)
-    p_b = m4.pvalues.get("Power", np.nan)
-    se_b = m4.bse.get("Power", np.nan)
+    coef_b = m4.params.get(mediator_col, np.nan)
+    p_b = m4.pvalues.get(mediator_col, np.nan)
+    se_b = m4.bse.get(mediator_col, np.nan)
     coef_a = m5.params.get("lnSubsidy", np.nan)
     p_a = m5.pvalues.get("lnSubsidy", np.nan)
     se_a = m5.bse.get("lnSubsidy", np.nan)
@@ -800,6 +930,8 @@ def _summarize_mediation(label, m3, m4, m5, sample_size, n_clusters):
 
     return {
         "group": label,
+        "mediator_col": mediator_col,
+        "mediator_method": mediator_method,
         "sample_size": int(sample_size),
         "n_clusters": int(n_clusters),
         "coef_c": float(coef_c),
@@ -814,16 +946,21 @@ def _summarize_mediation(label, m3, m4, m5, sample_size, n_clusters):
         "sobel_z": float(sobel_z),
         "sobel_p": float(sobel_p),
         "mediation_ratio_pct": float(mediation_ratio),
-        "conclusion": _classify_mediation_pvalue(sobel_p),
+        "sobel_signal": _classify_pvalue_signal(sobel_p),
+        "indirect_direction_consistent": _effect_direction_consistent(coef_c, indirect_effect),
+        "path_a_significant": bool(pd.notna(p_a) and p_a < 0.05),
+        "path_b_significant": bool(pd.notna(p_b) and p_b < 0.05),
         "fdr_p": np.nan,
-        "fdr_conclusion": "不适用",
+        "fdr_signal": "不适用",
         "bootstrap_reps": 0,
         "bootstrap_mean_indirect": np.nan,
         "bootstrap_p": np.nan,
         "bootstrap_ci_lower": np.nan,
         "bootstrap_ci_upper": np.nan,
         "bootstrap_conclusion": "未执行",
-        "rigor_conclusion": "未评估",
+        "bootstrap_supported": False,
+        "mediation_type": "未评估",
+        "group_evidence_level": "未评估",
     }
 
 
@@ -849,8 +986,11 @@ def _print_mediation_summary(summary, indent="  "):
     print(f"\n{indent}Sobel 检验:")
     print(f"{indent}  间接效应 (a×b) = {summary['indirect_effect']:.6f}")
     print(f"{indent}  Sobel Z = {summary['sobel_z']:.4f}")
-    print(f"{indent}  Sobel p = {_format_pvalue(summary['sobel_p'])}")
+    print(f"{indent}  Sobel p = {_format_pvalue(summary['sobel_p'])} ({summary['sobel_signal']})")
     print(f"{indent}  中介效应占总效应比例 = {summary['mediation_ratio_pct']:.2f}%")
+    print(f"{indent}  路径a显著: {'是' if summary['path_a_significant'] else '否'}")
+    print(f"{indent}  路径b显著: {'是' if summary['path_b_significant'] else '否'}")
+    print(f"{indent}  间接效应方向与总效应一致: {'是' if summary['indirect_direction_consistent'] else '否'}")
     if summary.get("bootstrap_reps", 0):
         print(f"\n{indent}Cluster Bootstrap ({summary['bootstrap_reps']} 次):")
         print(
@@ -864,9 +1004,9 @@ def _print_mediation_summary(summary, indent="  "):
         print(f"{indent}  Bootstrap 判定 = {summary['bootstrap_conclusion']}")
     if pd.notna(summary.get("fdr_p", np.nan)):
         print(f"{indent}  FDR 校正后 p = {_format_pvalue(summary['fdr_p'])}")
-        print(f"{indent}  FDR 判定 = {summary['fdr_conclusion']}")
-    print(f"\n{indent}原始结论：{summary['conclusion']}")
-    print(f"{indent}严格口径：{summary.get('rigor_conclusion', '未评估')}")
+        print(f"{indent}  FDR 信号 = {summary['fdr_signal']}")
+    print(f"\n{indent}最终中介类型：{summary.get('mediation_type', '未评估')}")
+    print(f"{indent}分组严谨口径：{summary.get('group_evidence_level', '未评估')}")
 
 
 def _augment_summary_with_bootstrap(fit_result, reps, seed):
@@ -879,16 +1019,24 @@ def _augment_summary_with_bootstrap(fit_result, reps, seed):
         fit_result["groups"],
         reps=reps,
         seed=seed,
+        mediator_col=fit_result["summary"]["mediator_col"],
     )
     fit_result["summary"].update(bootstrap_result)
-    fit_result["summary"]["rigor_conclusion"] = _derive_rigor_conclusion(fit_result["summary"])
+    fit_result["summary"]["bootstrap_supported"] = bool(
+        _ci_excludes_zero(
+            fit_result["summary"]["bootstrap_ci_lower"],
+            fit_result["summary"]["bootstrap_ci_upper"],
+        )
+    )
+    fit_result["summary"]["mediation_type"] = _classify_mediation_type(fit_result["summary"])
+    fit_result["summary"]["group_evidence_level"] = _classify_group_evidence(fit_result["summary"])
     return fit_result
 
 
-def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay"):
+def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay", mediator_col="Power", mediator_method="FA"):
     """在给定样本上统一拟合模型3/4/5并汇总中介效应。"""
     core3 = ["lnSubsidy"] + control_vars
-    core4 = ["lnSubsidy", "Power"] + control_vars
+    core4 = ["lnSubsidy", mediator_col] + control_vars
     core5 = ["lnSubsidy"] + control_vars
 
     needed = core4 + [dep_var, "IndustrySector"]
@@ -903,21 +1051,31 @@ def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay"):
 
     m3 = _fit_with_cluster_se(unified[dep_var], x3, groups)
     m4 = _fit_with_cluster_se(unified[dep_var], x4, groups)
-    m5 = _fit_with_cluster_se(unified["Power"], x5, groups)
+    m5 = _fit_with_cluster_se(unified[mediator_col], x5, groups)
 
     n_unified = len(unified)
     n_clusters = groups.nunique()
-    summary = _summarize_mediation(label, m3, m4, m5, n_unified, n_clusters)
+    summary = _summarize_mediation(
+        label,
+        m3,
+        m4,
+        m5,
+        n_unified,
+        n_clusters,
+        mediator_col=mediator_col,
+        mediator_method=mediator_method,
+    )
 
     return {
         "label": label,
+        "unified_df": unified.copy(),
         "m3": m3,
         "m4": m4,
         "m5": m5,
         "x4": x4,
         "x5": x5,
         "y4": unified[dep_var],
-        "y5": unified["Power"],
+        "y5": unified[mediator_col],
         "groups": groups,
         "n3": n_unified,
         "n4": n_unified,
@@ -996,7 +1154,69 @@ def _print_subsample_model34(label, fit_result):
     )
 
 
-def run_regressions(df):
+def _build_power_method_comparison(df, control_vars, power_diagnostics=None):
+    """比较 PCA/FA/熵值法三种 Power 构造在全样本中的中介结果。"""
+    power_diagnostics = power_diagnostics or {}
+    rows = []
+    method_specs = [
+        {"method": "FA", "role": "修订后主测度", "power_col": "Power_FA", "diag_key": "fa"},
+        {"method": "熵值法", "role": "稳健性替代", "power_col": "Power_entropy", "diag_key": "entropy"},
+        {"method": "PCA", "role": "原始方案对照", "power_col": "Power_PCA", "diag_key": "pca"},
+    ]
+
+    for spec in method_specs:
+        if spec["power_col"] not in df.columns:
+            continue
+        df_method = df.copy()
+        df_method["Power"] = df_method[spec["power_col"]]
+        fit_result = _run_mediation_models(
+            df_method,
+            label=spec["method"],
+            control_vars=control_vars,
+            mediator_col="Power",
+            mediator_method=spec["method"],
+        )
+        if fit_result is None:
+            continue
+        _augment_summary_with_bootstrap(
+            fit_result,
+            reps=MAIN_MEDIATION_BOOTSTRAP_REPS,
+            seed=_stable_seed_from_text(f"PowerMethod::{spec['method']}"),
+        )
+        summary = fit_result["summary"]
+        diag = power_diagnostics.get(spec["diag_key"], {})
+        rows.append({
+            "method": spec["method"],
+            "role": spec["role"],
+            "power_col": spec["power_col"],
+            "sample_size": summary["sample_size"],
+            "n_clusters": summary["n_clusters"],
+            "kmo": diag.get("kmo_overall", np.nan),
+            "bartlett_p": diag.get("bartlett_p", np.nan),
+            "primary_variance_ratio": diag.get(
+                "variance_explained_ratio",
+                diag.get("explained_variance_ratio_pc1", np.nan),
+            ),
+            "coef_a": summary["coef_a"],
+            "p_a": summary["p_a"],
+            "coef_b": summary["coef_b"],
+            "p_b": summary["p_b"],
+            "sobel_p": summary["sobel_p"],
+            "bootstrap_p": summary["bootstrap_p"],
+            "bootstrap_ci_lower": summary["bootstrap_ci_lower"],
+            "bootstrap_ci_upper": summary["bootstrap_ci_upper"],
+            "bootstrap_supported": summary["bootstrap_supported"],
+            "indirect_direction_consistent": summary["indirect_direction_consistent"],
+            "path_a_significant": summary["path_a_significant"],
+            "path_b_significant": summary["path_b_significant"],
+            "mediation_type": summary["mediation_type"],
+            "group_evidence_level": summary["group_evidence_level"],
+        })
+
+    return pd.DataFrame(rows)
+
+
+def run_regressions(df, power_diagnostics=None):
     """
     模型3: Overpay = α₀ + α₁·lnSubsidy + 控制 + ΣIndustry + ΣYear + ε
     模型4: Overpay = α₀ + α₁·lnSubsidy + α₂·Power + 控制 + ΣIndustry + ΣYear + ε
@@ -1009,8 +1229,9 @@ def run_regressions(df):
     print("=" * 70)
 
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
+    power_diagnostics = power_diagnostics or df.attrs.get("power_diagnostics", {})
 
-    fit_result = _run_mediation_models(df, "全样本", control_vars)
+    fit_result = _run_mediation_models(df, "全样本", control_vars, mediator_col="Power", mediator_method="FA")
     if fit_result is None:
         raise RuntimeError("全样本无法完成模型3/4/5回归，请检查缺失值处理。")
     _augment_summary_with_bootstrap(
@@ -1018,6 +1239,7 @@ def run_regressions(df):
         reps=MAIN_MEDIATION_BOOTSTRAP_REPS,
         seed=_stable_seed_from_text("全样本"),
     )
+    fit_result["summary"]["power_measure_method"] = "FA"
     df_unified = df.dropna(subset=["lnSubsidy", "Power"] + control_vars + ["Overpay", "IndustrySector"]).copy()
     print(f"\n统一样本量（模型3/4/5共用）: N = {len(df_unified)}")
     print(f"  聚类数（公司数）: {df_unified['Symbol'].nunique()}")
@@ -1030,17 +1252,17 @@ def run_regressions(df):
     model3 = fit_result["m3"]
     _print_core_results(model3, core3, fit_result["ind3"], fit_result["year3"], len(df_unified), fit_result["cl3"])
 
-    # ---- 模型4：加入管理层权力（中介效应） ----
+    # ---- 模型4：加入管理层权力（FA 修订后主测度） ----
     print("\n" + "-" * 50)
-    print("模型4: Overpay = f(lnSubsidy, Power, Controls, ΣIndustry, ΣYear)")
+    print("模型4: Overpay = f(lnSubsidy, Power[FA修订后主测度], Controls, ΣIndustry, ΣYear)")
     print("-" * 50)
     core4 = ["lnSubsidy", "Power"] + control_vars
     model4 = fit_result["m4"]
     _print_core_results(model4, core4, fit_result["ind4"], fit_result["year4"], len(df_unified), fit_result["cl4"])
 
-    # ---- 模型5：政府补助对管理层权力 ----
+    # ---- 模型5：政府补助对管理层权力（FA 修订后主测度） ----
     print("\n" + "-" * 50)
-    print("模型5: Power = f(lnSubsidy, Controls, ΣIndustry, ΣYear)")
+    print("模型5: Power[FA修订后主测度] = f(lnSubsidy, Controls, ΣIndustry, ΣYear)")
     print("-" * 50)
     core5 = ["lnSubsidy"] + control_vars
     model5 = fit_result["m5"]
@@ -1052,12 +1274,15 @@ def run_regressions(df):
     print("=" * 50)
     _print_mediation_summary(fit_result["summary"])
 
+    method_comparison = _build_power_method_comparison(df, control_vars, power_diagnostics)
+
     return {
         "model3": model3,
         "model4": model4,
         "model5": model5,
         "summary": fit_result["summary"],
         "fit_result": fit_result,
+        "method_comparison": method_comparison,
     }
 
 
@@ -1170,7 +1395,7 @@ def grouped_mediation_analysis(df):
             f"  {spec['label']}: N={summary['sample_size']}, 聚类={summary['n_clusters']}, "
             f"a={summary['coef_a']:.4f} (p={_format_pvalue(summary['p_a'])}), "
             f"b={summary['coef_b']:.4f} (p={_format_pvalue(summary['p_b'])}), "
-            f"Sobel p={_format_pvalue(summary['sobel_p'])} -> {summary['conclusion']}"
+            f"Sobel p={_format_pvalue(summary['sobel_p'])} ({summary['sobel_signal']})"
         )
 
     if not fit_results:
@@ -1180,14 +1405,15 @@ def grouped_mediation_analysis(df):
     fdr_df = _apply_layerwise_fdr(raw_df)
     for idx, fit_result in enumerate(fit_results):
         fit_result["summary"]["fdr_p"] = float(fdr_df.iloc[idx]["fdr_p"])
-        fit_result["summary"]["fdr_conclusion"] = fdr_df.iloc[idx]["fdr_conclusion"]
+        fit_result["summary"]["fdr_signal"] = fdr_df.iloc[idx]["fdr_signal"]
+        fit_result["summary"]["group_evidence_level"] = _classify_group_evidence(fit_result["summary"])
 
     print("\n[分层 FDR 校正]")
     for fit_result in fit_results:
         summary = fit_result["summary"]
         print(
             f"  {summary['group']}: 原始 p={_format_pvalue(summary['sobel_p'])}, "
-            f"FDR p={_format_pvalue(summary['fdr_p'])} -> {summary['fdr_conclusion']}"
+            f"FDR p={_format_pvalue(summary['fdr_p'])} -> {summary['fdr_signal']}"
         )
 
     print(f"\n[Cluster Bootstrap 复核：仅对原始 Sobel p < {GROUPED_BOOTSTRAP_TRIGGER_P:.2f} 的分组执行]")
@@ -1202,19 +1428,27 @@ def grouped_mediation_analysis(df):
             print(
                 f"  {summary['group']}: 95% CI = "
                 f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}] "
-                f"-> {summary['bootstrap_conclusion']}；严格口径：{summary['rigor_conclusion']}"
+                f"-> {summary['bootstrap_conclusion']}；中介类型：{summary['mediation_type']}；"
+                f"严谨口径：{summary['group_evidence_level']}"
             )
         else:
-            summary["rigor_conclusion"] = _derive_rigor_conclusion(summary)
-            print(f"  {summary['group']}: 未执行 bootstrap；严格口径：{summary['rigor_conclusion']}")
+            summary["mediation_type"] = _classify_mediation_type(summary)
+            summary["group_evidence_level"] = _classify_group_evidence(summary)
+            print(
+                f"  {summary['group']}: 未执行 bootstrap；中介类型：{summary['mediation_type']}；"
+                f"严谨口径：{summary['group_evidence_level']}"
+            )
 
     ordered_cols = [
         "layer", "group", "sample_size", "n_clusters",
         "coef_c", "p_c", "coef_a", "p_a", "coef_b", "p_b",
         "coef_c_prime", "p_c_prime", "indirect_effect",
-        "sobel_z", "sobel_p", "fdr_p", "mediation_ratio_pct", "conclusion", "fdr_conclusion",
+        "sobel_z", "sobel_p", "sobel_signal", "fdr_p", "fdr_signal",
+        "mediation_ratio_pct", "indirect_direction_consistent",
+        "path_a_significant", "path_b_significant",
         "bootstrap_reps", "bootstrap_mean_indirect", "bootstrap_p",
-        "bootstrap_ci_lower", "bootstrap_ci_upper", "bootstrap_conclusion", "rigor_conclusion",
+        "bootstrap_ci_lower", "bootstrap_ci_upper", "bootstrap_conclusion",
+        "bootstrap_supported", "mediation_type", "group_evidence_level",
     ]
     return pd.DataFrame([fit_result["summary"] for fit_result in fit_results])[ordered_cols]
 
@@ -1374,13 +1608,33 @@ def build_analysis_dataset(data_dir):
     df = construct_variables(df)
     df = filter_and_describe(df)
     df = compute_overpay(df)
-    df, pca_diagnostics = compute_power(df, return_diagnostics=True)
-    return df, pca_diagnostics
+    df, power_diagnostics = compute_power(df, return_diagnostics=True)
+    return df, power_diagnostics
 
 
-def save_structured_outputs(output_dir, pca_diagnostics, main_regression, grouped_mediation_df):
+def save_structured_outputs(output_dir, power_diagnostics, main_regression, grouped_mediation_df):
     """保存供文稿复用的结构化结果。"""
     os.makedirs(output_dir, exist_ok=True)
+
+    power_vars = power_diagnostics.get("power_vars", ["Tenure", "Dual", "Boardsize", "Insider", "Mgshder"])
+    unified_df = main_regression.get("fit_result", {}).get("unified_df")
+
+    # 诊断口径与正文主回归样本保持一致，避免使用更宽的 Power 可构造样本。
+    if unified_df is not None and not unified_df.empty:
+        diag_source = unified_df.dropna(subset=power_vars).copy()
+        standardized = _standardize_power_inputs(diag_source, power_vars)
+        shared_diag = _calc_shared_factor_diagnostics(standardized, power_vars)
+        pca_diagnostics = {**shared_diag, **_compute_pca_power(standardized, power_vars)}
+        fa_result = _compute_fa_power(standardized, power_vars)
+        fa_diagnostics = {
+            **shared_diag,
+            **fa_result,
+            "average_communality": float(np.mean(list(fa_result["communalities"].values()))),
+        }
+    else:
+        pca_diagnostics = power_diagnostics.get("pca", {})
+        fa_diagnostics = power_diagnostics.get("fa", {})
+    entropy_diagnostics = power_diagnostics.get("entropy", {})
 
     pca_summary = pd.DataFrame([{
         "样本量": pca_diagnostics["n_obs"],
@@ -1400,9 +1654,32 @@ def save_structured_outputs(output_dir, pca_diagnostics, main_regression, groupe
             "KMO": pca_diagnostics["kmo_per_var"][var],
             "载荷": pca_diagnostics["loadings"][var],
         }
-        for var in ["Tenure", "Dual", "Boardsize", "Insider", "Mgshder"]
+        for var in power_vars
     ])
     pca_var.to_csv(os.path.join(output_dir, "pca_variable_metrics.csv"), index=False)
+
+    fa_diag_df = pd.DataFrame([
+        {
+            "变量": var,
+            "KMO": fa_diagnostics["kmo_per_var"][var],
+            "FA载荷": fa_diagnostics["loadings"][var],
+            "共同度": fa_diagnostics["communalities"][var],
+            "特殊方差": fa_diagnostics["uniqueness"][var],
+            "因子得分权重": fa_diagnostics["score_weights"][var],
+            "KMO总体": fa_diagnostics["kmo_overall"],
+            "Bartlett_p": fa_diagnostics["bartlett_p"],
+            "单因子方差解释率": fa_diagnostics["variance_explained_ratio"],
+        }
+        for var in power_vars
+    ])
+    fa_diag_df.to_csv(os.path.join(output_dir, "power_fa_diagnostics.csv"), index=False)
+
+    power_method_rows = main_regression.get("method_comparison", pd.DataFrame())
+    if isinstance(power_method_rows, pd.DataFrame) and not power_method_rows.empty:
+        power_method_rows.to_csv(
+            os.path.join(output_dir, "power_method_comparison.csv"),
+            index=False,
+        )
 
     pd.DataFrame([main_regression["summary"]]).to_csv(
         os.path.join(output_dir, "main_mediation_summary.csv"),
@@ -1426,10 +1703,10 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     # 1-5. 加载数据并构造分析变量
-    df, pca_diagnostics = build_analysis_dataset(data_dir)
+    df, power_diagnostics = build_analysis_dataset(data_dir)
 
     # 6. 回归分析 (含 Sobel 中介效应检验)
-    main_regression = run_regressions(df)
+    main_regression = run_regressions(df, power_diagnostics)
 
     # 7. 异质性分析（分产权）
     heterogeneity_analysis(df)
@@ -1452,7 +1729,7 @@ def main():
     # 保存最终数据集
     output_file = os.path.join(output_dir, "regression_dataset.csv")
     df.to_csv(output_file, index=False)
-    save_structured_outputs(output_dir, pca_diagnostics, main_regression, grouped_mediation_df)
+    save_structured_outputs(output_dir, power_diagnostics, main_regression, grouped_mediation_df)
     print(f"\n最终分析数据集已保存至: {output_file}")
     print(f"总行数: {len(df)}, 总列数: {len(df.columns)}")
 
