@@ -2,14 +2,17 @@
   "split": {
     "test_size": 0.2,
     "random_state": 42,
-    "train_size": 35720,
-    "test_size_n": 8930,
-    "classification_stratified": true
+    "train_size": 35580,
+    "test_size_n": 9070,
+    "holdout_method": "GroupShuffleSplit",
+    "group_isolation": true,
+    "classification_stratified": false
   },
   "cross_validation": {
     "folds": 5,
-    "regression": "KFold(shuffle=True)",
-    "classification": "StratifiedKFold(shuffle=True)"
+    "lasso_internal": "KFold(shuffle=True)",
+    "regression": "GroupKFold(n_splits=5)",
+    "classification": "GroupKFold(n_splits=5)"
   },
   "class_balance": {
     "positive_count": 22006,
@@ -17,7 +20,7 @@
     "positive_ratio": 0.4928555431131019,
     "imbalance_judgment": "不严重失衡",
     "resampling": "未使用SMOTE",
-    "handling": "仅使用 stratify，并比较 class_weight / scale_pos_weight"
+    "handling": "holdout采用GroupShuffleSplit并保持公司层面隔离；分类模型调参比较 class_weight / scale_pos_weight"
   },
   "search_spaces": {
     "lasso_alpha_grid": [
@@ -205,7 +208,7 @@
       ],
       "scale_pos_weight": [
         1.0,
-        1.029
+        1.0464
       ]
     },
     "decision_tree": {
@@ -228,41 +231,41 @@
   "best_params": {
     "ols": {},
     "lasso": {
-      "alpha": 0.00032245905452963947
+      "alpha": 0.0003919406774847221
     },
     "rf_regression": {
       "n_estimators": 300,
-      "min_samples_leaf": 50,
-      "max_features": 0.6,
-      "max_depth": null
+      "min_samples_leaf": 10,
+      "max_features": "sqrt",
+      "max_depth": 10
     },
     "rf_classification": {
       "n_estimators": 300,
       "min_samples_leaf": 10,
       "max_features": "sqrt",
-      "max_depth": null,
-      "class_weight": null
+      "max_depth": 10,
+      "class_weight": "balanced"
     },
     "xgb_regression": {
       "subsample": 0.7,
       "n_estimators": 200,
-      "min_child_weight": 10,
+      "min_child_weight": 20,
       "max_depth": 6,
-      "learning_rate": 0.08,
-      "colsample_bytree": 0.8
+      "learning_rate": 0.03,
+      "colsample_bytree": 0.7
     },
     "logit": {
-      "model__C": 0.1,
+      "model__C": 1.0,
       "model__class_weight": "balanced"
     },
     "xgb_classification": {
       "subsample": 0.8,
-      "scale_pos_weight": 1.0,
+      "scale_pos_weight": 1.0464,
       "n_estimators": 400,
       "min_child_weight": 10,
-      "max_depth": 6,
-      "learning_rate": 0.08,
-      "colsample_bytree": 0.9
+      "max_depth": 4,
+      "learning_rate": 0.03,
+      "colsample_bytree": 0.7
     },
     "decision_tree": {
       "class_weight": "balanced",

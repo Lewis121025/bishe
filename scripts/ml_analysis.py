@@ -139,7 +139,7 @@ def prepare_ml_data(df):
     print(f"  超额薪酬为正样本: {positive_count}")
     print(f"  超额薪酬为负样本: {negative_count}")
     print(f"  正类比例: {positive_ratio:.4%}")
-    print("  判断：类别分布基本均衡，不采用 SMOTE，仅使用 stratify 和 class_weight/scale_pos_weight 比较。")
+    print("  判断：类别分布基本均衡，不采用 SMOTE；holdout 使用 GroupShuffleSplit，公司层面隔离，并在分类模型中比较 class_weight/scale_pos_weight。")
 
     return {
         "df_ml": df_ml,
@@ -766,18 +766,21 @@ def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_r
             "random_state": RANDOM_STATE,
             "train_size": int(len(splits["train_idx"])),
             "test_size_n": int(len(splits["test_idx"])),
-            "classification_stratified": True,
+            "holdout_method": "GroupShuffleSplit",
+            "group_isolation": True,
+            "classification_stratified": False,
         },
         "cross_validation": {
             "folds": CV_FOLDS,
-            "regression": "KFold(shuffle=True)",
-            "classification": "StratifiedKFold(shuffle=True)",
+            "lasso_internal": "KFold(shuffle=True)",
+            "regression": "GroupKFold(n_splits=5)",
+            "classification": "GroupKFold(n_splits=5)",
         },
         "class_balance": {
             **class_balance,
             "imbalance_judgment": "不严重失衡",
             "resampling": "未使用SMOTE",
-            "handling": "仅使用 stratify，并比较 class_weight / scale_pos_weight",
+            "handling": "holdout采用GroupShuffleSplit并保持公司层面隔离；分类模型调参比较 class_weight / scale_pos_weight",
         },
         "search_spaces": {
             "lasso_alpha_grid": list(np.logspace(-4, 1, 60)),
