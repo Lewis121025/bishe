@@ -66,15 +66,28 @@ def format_pval(pval):
     return f"{pval:.4f}"
 
 
+def _get_tstat(model, var_name):
+    if hasattr(model, "tstats") and var_name in model.tstats:
+        return model.tstats[var_name]
+    return model.tvalues[var_name]
+
+
+def _get_std_error(model, var_name):
+    if hasattr(model, "std_errors") and var_name in model.std_errors:
+        return model.std_errors[var_name]
+    return model.bse[var_name]
+
+
 def fit_model(df, dep_var, core_vars, df_pre=None):
     """回归拟合"""
     if df_pre is not None:
         sub = df_pre
     else:
-        needed = core_vars + [dep_var, "IndustrySector"]
+        needed = core_vars + [dep_var, "IndustrySector", "Year"]
         sub = df.dropna(subset=needed).copy()
     if len(sub) == 0:
         return None, 0
+    sub = sub.set_index(["Symbol", "Year"], drop=False)
     x, _, _ = _build_fe_matrix(sub, core_vars)
     y = sub[dep_var]
     model = _fit_with_cluster_se(y, x, sub["Symbol"])
@@ -194,16 +207,16 @@ def build_desc_table_docx(doc, df):
         "Top1": "第一大股东持股比例(Top1)",
     }
 
-    headers = ["变量", "N", "均值", "标准差", "最小值", "最大值"]
+    headers = ["变量", "N", "均值", "中位数", "标准差", "最小值", "最大值"]
     rows_data = []
     for var, label in desc_vars_map.items():
         if var in df.columns:
             s = df[var].dropna()
             def fmt(v):
                 return f"{v:.4f}" if abs(v) < 1e6 else f"{v:.2e}"
-            rows_data.append([label, str(int(s.count())), fmt(s.mean()), fmt(s.std()), fmt(s.min()), fmt(s.max())])
+            rows_data.append([label, str(int(s.count())), fmt(s.mean()), fmt(s.median()), fmt(s.std()), fmt(s.min()), fmt(s.max())])
 
-    table = doc.add_table(rows=1 + len(rows_data), cols=6)
+    table = doc.add_table(rows=1 + len(rows_data), cols=7)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
     # 表头
@@ -245,7 +258,7 @@ def build_first_stage_table_docx(doc, df):
     for var in display_vars:
         set_cell_text(table.cell(row_idx, 0), var, alignment=WD_ALIGN_PARAGRAPH.LEFT)
         set_cell_text(table.cell(row_idx, 1), format_coef(model.params[var], model.pvalues[var]) if model else "—")
-        set_cell_text(table.cell(row_idx, 2), format_tval(model.tvalues[var]) if model else "")
+        set_cell_text(table.cell(row_idx, 2), format_tval(_get_tstat(model, var)) if model else "")
         set_cell_text(table.cell(row_idx, 3), explanations[var], alignment=WD_ALIGN_PARAGRAPH.LEFT)
         row_idx += 1
 
@@ -312,7 +325,7 @@ def _add_regression_table(doc, title, col_headers, sub_headers, display_vars, mo
         set_cell_text(table.cell(row_idx, 0), "")
         for m_idx, (model, _) in enumerate(models_data):
             if model is not None and var in model.params:
-                text = format_tval(model.tvalues[var])
+                text = format_tval(_get_tstat(model, var))
             else:
                 text = ""
             set_cell_text(table.cell(row_idx, m_idx + 1), text)
@@ -345,14 +358,14 @@ def _add_regression_table(doc, title, col_headers, sub_headers, display_vars, mo
 def build_main_table_docx(doc, df):
     """表3 主回归（统一样本）"""
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
-    all_needed = ["lnSubsidy", "Power"] + control_vars + ["Overpay", "IndustrySector"]
+    all_needed = ["lnSubsidy_l1", "Power"] + control_vars + ["Overpay", "IndustrySector", "Year"]
     df_unified = df.dropna(subset=all_needed).copy()
 
-    m3, n3 = fit_model(df, "Overpay", ["lnSubsidy"] + control_vars, df_pre=df_unified)
-    m4, n4 = fit_model(df, "Overpay", ["lnSubsidy", "Power"] + control_vars, df_pre=df_unified)
-    m5, n5 = fit_model(df, "Power", ["lnSubsidy"] + control_vars, df_pre=df_unified)
+    m3, n3 = fit_model(df, "Overpay", ["lnSubsidy_l1"] + control_vars, df_pre=df_unified)
+    m4, n4 = fit_model(df, "Overpay", ["lnSubsidy_l1", "Power"] + control_vars, df_pre=df_unified)
+    m5, n5 = fit_model(df, "Power", ["lnSubsidy_l1"] + control_vars, df_pre=df_unified)
 
-    display_vars = ["lnSubsidy", "Power", "Roa", "Lever", "Top1", "Zone"]
+    display_vars = ["lnSubsidy_l1", "Power", "Roa", "Lever", "Top1", "Zone"]
     fe = ["控制"] * 3
 
     _add_regression_table(
@@ -362,9 +375,9 @@ def build_main_table_docx(doc, df):
         ["Overpay", "Overpay", "Power(FA)"],
         display_vars,
         [(m3, n3), (m4, n4), (m5, n5)],
-        "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。Power 为因子分析（FA）构造的修订后主测度；PCA 结果作为上一版原始方案对照另行报告。标准误为公司层面聚类稳健标准误。",
+        "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。Power 为因子分析（FA）构造的管理层权力指标。标准误为公司层面聚类稳健标准误。",
         extra_rows=[
-            ("Industry FE", fe),
+            ("Firm FE", fe),
             ("Year FE", fe),
         ],
     )
@@ -372,80 +385,82 @@ def build_main_table_docx(doc, df):
 
 def build_mediation_table_docx(doc, df):
     """表4 全样本中介效应检验。"""
-    summary = df["summary"] if isinstance(df, dict) else run_regressions(df)["summary"]
-    add_table_title(doc, "表4  管理层权力中介效应检验（全样本，修订后主测度：Power 为 FA）")
+    results = df if isinstance(df, dict) else run_regressions(df)
+    summary = results["summary"]
+    model3 = results["model3"]
+    model4 = results["model4"]
+    model5 = results["model5"]
+    add_table_title(doc, "表4  管理层权力的中介效应检验结果（FA口径，公司与年份固定效应）")
 
     rows = [
-        ("lnSubsidy → Overpay（总效应 c）", f"{summary['coef_c']:.4f}", format_pval(summary["p_c"])),
-        ("lnSubsidy → Power（路径 a）", f"{summary['coef_a']:.4f}", format_pval(summary["p_a"])),
-        ("Power → Overpay（路径 b）", f"{summary['coef_b']:.4f}", format_pval(summary["p_b"])),
-        ("lnSubsidy → Overpay（直接效应 c'）", f"{summary['coef_c_prime']:.4f}", format_pval(summary["p_c_prime"])),
-        ("间接效应（a×b）", f"{summary['indirect_effect']:.6f}", "—"),
-        ("Sobel Z", f"{summary['sobel_z']:.4f}", "—"),
-        ("Sobel p", format_pval(summary["sobel_p"]), summary["sobel_signal"]),
-        ("Bootstrap p", format_pval(summary["bootstrap_p"]), "—"),
-        ("Bootstrap 95%CI", f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}]", "—"),
-        ("路径a显著", "是" if summary["path_a_significant"] else "否", "—"),
-        ("路径b显著", "是" if summary["path_b_significant"] else "否", "—"),
-        ("中介效应占比(%)", f"{summary['mediation_ratio_pct']:.2f}", "—"),
+        ("总效应 c：lnSubsidy_l1 → Overpay", format_coef(summary["coef_c"], summary["p_c"]), f"{_get_std_error(model3, 'lnSubsidy_l1'):.4f}", "—"),
+        ("路径 a：lnSubsidy_l1 → Power（FA）", format_coef(summary["coef_a"], summary["p_a"]), f"{_get_std_error(model5, 'lnSubsidy_l1'):.4f}", "—"),
+        ("路径 b：Power（FA） → Overpay", format_coef(summary["coef_b"], summary["p_b"]), f"{_get_std_error(model4, 'Power'):.4f}", "—"),
+        ("直接效应 c'：lnSubsidy_l1 → Overpay", format_coef(summary["coef_c_prime"], summary["p_c_prime"]), f"{_get_std_error(model4, 'lnSubsidy_l1'):.4f}", "—"),
+        ("间接效应 a×b", f"{summary['indirect_effect']:.6f}", "—", f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}]"),
+        ("Sobel p 值", f"{summary['sobel_p']:.4f}", "—", "—"),
+        ("中介效应占比（a×b / c）", f"{summary['mediation_ratio_pct']:.2f}%", "—", "—"),
     ]
 
-    table = doc.add_table(rows=1 + len(rows), cols=3)
+    table = doc.add_table(rows=1 + len(rows), cols=4)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    headers = ["路径", "系数", "p值"]
+    headers = ["路径", "系数", "标准误（cluster）", "Bootstrap 95%CI"]
     for i, header in enumerate(headers):
         set_cell_text(table.cell(0, i), header, bold=True)
     for row_idx, row in enumerate(rows, start=1):
         set_cell_text(table.cell(row_idx, 0), row[0], alignment=WD_ALIGN_PARAGRAPH.LEFT)
         set_cell_text(table.cell(row_idx, 1), row[1])
         set_cell_text(table.cell(row_idx, 2), row[2])
+        set_cell_text(table.cell(row_idx, 3), row[3])
 
     apply_three_line_style(table, header_rows=1)
     add_table_note(
         doc,
-        f"注：中介类型为“{summary['mediation_type']}”；仅当路径a、路径b均显著、间接效应方向与总效应一致且 bootstrap 95%CI 不含0时，才认定为常规中介效应。PCA 原始方案对照与熵值法稳健性结果另行比较报告。"
+        "注：***、**、* 分别表示在1%、5%、10%水平上显著。Bootstrap 为公司层面 cluster bootstrap，300 次重抽样。所有回归均控制 Roa、Lever、Top1、Zone 以及公司和年份固定效应。"
     )
 
 
-def build_power_method_comparison_table_docx(doc, main_results):
-    """表5 Power 不同构造口径比较。"""
-    method_df = main_results["method_comparison"].copy()
-    add_table_title(doc, "表5  `Power` 不同构造口径下的全样本中介结果比较")
+def build_causal_table_docx(doc, main_results):
+    """表5 FE-2SLS 因果识别结果。"""
+    iv_result = main_results["iv_result"]
+    first_stage = iv_result["first_stage"]
+    second_stage = iv_result["model"]
+    add_table_title(doc, "表5  工具变量（FE-2SLS）估计结果")
 
-    table = doc.add_table(rows=1 + len(method_df), cols=5)
+    rows = [
+        ("第一阶段", "lnSubsidy_l1", format_coef(first_stage["coef"], first_stage["f_pval"]), f"Partial F = {first_stage['f_stat']:.2f}", str(iv_result["sample_size"])),
+        ("第二阶段", "Overpay", format_coef(second_stage.params["lnSubsidy_l1"], second_stage.pvalues["lnSubsidy_l1"]), f"t = {_get_tstat(second_stage, 'lnSubsidy_l1'):.4f}", str(iv_result["sample_size"])),
+    ]
+
+    table = doc.add_table(rows=1 + len(rows), cols=5)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    headers = ["方法", "角色", "路径b", "bootstrap 95%CI", "结论"]
+    headers = ["阶段", "因变量", "系数", "统计量", "N"]
     for i, header in enumerate(headers):
         set_cell_text(table.cell(0, i), header, bold=True)
 
-    for row_idx, (_, row) in enumerate(method_df.iterrows(), start=1):
-        set_cell_text(table.cell(row_idx, 0), row["method"])
-        set_cell_text(table.cell(row_idx, 1), row["role"])
-        set_cell_text(table.cell(row_idx, 2), format_coef(row["coef_b"], row["p_b"]))
-        set_cell_text(
-            table.cell(row_idx, 3),
-            f"[{row['bootstrap_ci_lower']:.6f}, {row['bootstrap_ci_upper']:.6f}]"
-        )
-        set_cell_text(table.cell(row_idx, 4), row["mediation_type"], alignment=WD_ALIGN_PARAGRAPH.LEFT)
+    for row_idx, row in enumerate(rows, start=1):
+        for col_idx, value in enumerate(row):
+            align = WD_ALIGN_PARAGRAPH.LEFT if col_idx == 1 else WD_ALIGN_PARAGRAPH.CENTER
+            set_cell_text(table.cell(row_idx, col_idx), value, alignment=align)
 
     apply_three_line_style(table, header_rows=1)
-    add_table_note(doc, "注：FA 为修订后主测度，PCA 为上一版原始方案对照，熵值法为稳健性替代。bootstrap 95%CI 为公司层面 cluster bootstrap（300 次）得到的 95% 置信区间。")
+    add_table_note(doc, f"注：第一阶段报告工具变量系数；Partial R² 为 {first_stage['partial_r2']:.4f}，说明工具变量具有统计相关性但解释力度有限。标准误为公司层面聚类稳健标准误。")
 
 
 def build_subsample_table_docx(doc, df, title, group_specs):
     """分组回归表（统一样本）"""
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
-    display_vars = ["lnSubsidy", "Power", "Roa", "Lever", "Top1", "Zone"]
+    display_vars = ["lnSubsidy_l1", "Power", "Roa", "Lever", "Top1", "Zone"]
 
     models_data = []
     col_headers = []
     sub_headers = []
     for label, mask in group_specs:
         df_sub = df[mask].copy()
-        all_needed = ["lnSubsidy", "Power"] + control_vars + ["Overpay", "IndustrySector"]
+        all_needed = ["lnSubsidy_l1", "Power"] + control_vars + ["Overpay", "IndustrySector", "Year"]
         df_sub_unified = df_sub.dropna(subset=all_needed).copy()
-        m3, n3 = fit_model(df_sub, "Overpay", ["lnSubsidy"] + control_vars, df_pre=df_sub_unified)
-        m4, n4 = fit_model(df_sub, "Overpay", ["lnSubsidy", "Power"] + control_vars, df_pre=df_sub_unified)
+        m3, n3 = fit_model(df_sub, "Overpay", ["lnSubsidy_l1"] + control_vars, df_pre=df_sub_unified)
+        m4, n4 = fit_model(df_sub, "Overpay", ["lnSubsidy_l1", "Power"] + control_vars, df_pre=df_sub_unified)
         models_data.extend([(m3, n3), (m4, n4)])
         col_headers.extend([f"{label}-模型(3)", f"{label}-模型(4)"])
         sub_headers.extend(["Overpay", "Overpay"])
@@ -455,7 +470,7 @@ def build_subsample_table_docx(doc, df, title, group_specs):
     _add_regression_table(
         doc, title, col_headers, sub_headers, display_vars, models_data,
         "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。标准误为公司层面聚类稳健标准误。",
-        extra_rows=[("Industry FE", fe), ("Year FE", fe)],
+        extra_rows=[("Firm FE", fe), ("Year FE", fe)],
     )
 
 
@@ -503,42 +518,38 @@ def build_grouped_mediation_table_docx(doc, df):
 def build_robustness_table_docx(doc, df):
     """表9 稳健性检验"""
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
-    core_vars = ["lnSubsidy"] + control_vars
+    core_vars = ["lnSubsidy_l1"] + control_vars
 
     checks = []
 
     # (1)
     m1, n1 = fit_model(df, "lnCEOpay", core_vars)
-    checks.append(("(1) 替换因变量", "lnCEOpay", m1, n1, "lnSubsidy"))
+    checks.append(("(1) 替换因变量", "lnCEOpay", m1, n1, "lnSubsidy_l1"))
 
     # (2)
     df_r2 = df[(df["Year"] >= 2010) & (df["Year"] <= 2020)].copy()
     m2, n2 = fit_model(df_r2, "Overpay", core_vars)
-    checks.append(("(2) 缩小样本期", "Overpay", m2, n2, "lnSubsidy"))
+    checks.append(("(2) 缩小样本期", "Overpay", m2, n2, "lnSubsidy_l1"))
 
     # (3)
-    q05 = df["lnSubsidy"].quantile(0.05)
-    q95 = df["lnSubsidy"].quantile(0.95)
-    df_r3 = df[(df["lnSubsidy"] >= q05) & (df["lnSubsidy"] <= q95)].copy()
+    q05 = df["lnSubsidy_l1"].quantile(0.05)
+    q95 = df["lnSubsidy_l1"].quantile(0.95)
+    df_r3 = df[(df["lnSubsidy_l1"] >= q05) & (df["lnSubsidy_l1"] <= q95)].copy()
     m3, n3 = fit_model(df_r3, "Overpay", core_vars)
-    checks.append(("(3) 剔除极端补助", "Overpay", m3, n3, "lnSubsidy"))
+    checks.append(("(3) 剔除极端补助", "Overpay", m3, n3, "lnSubsidy_l1"))
 
     # (4)
     df_r4 = df[df["Industry"] == 1].copy()
     m4, n4 = fit_model(df_r4, "Overpay", core_vars)
-    checks.append(("(4) 仅制造业", "Overpay", m4, n4, "lnSubsidy"))
+    checks.append(("(4) 仅制造业", "Overpay", m4, n4, "lnSubsidy_l1"))
 
     # (5)
-    core_alt = ["lnSubsidy1p"] + control_vars
-    m5, n5 = fit_model(df, "Overpay", core_alt)
-    checks.append(("(5) 替换解释变量", "Overpay", m5, n5, "lnSubsidy1p"))
-
-    # (6)
-    df_lag = df.sort_values(["Symbol", "Year"]).copy()
-    df_lag["lnSubsidy_l1"] = df_lag.groupby("Symbol")["lnSubsidy"].shift(1)
-    core_lag = ["lnSubsidy_l1"] + control_vars
-    m6, n6 = fit_model(df_lag, "Overpay", core_lag)
-    checks.append(("(6) 滞后一期", "Overpay", m6, n6, "lnSubsidy_l1"))
+    df_alt = df.sort_values(["Symbol", "Year"]).copy()
+    if "lnSubsidy1p_l1" not in df_alt.columns:
+        df_alt["lnSubsidy1p_l1"] = df_alt.groupby("Symbol")["lnSubsidy1p"].shift(1)
+    core_alt = ["lnSubsidy1p_l1"] + control_vars
+    m5, n5 = fit_model(df_alt, "Overpay", core_alt)
+    checks.append(("(5) 替换解释变量", "Overpay", m5, n5, "lnSubsidy1p_l1"))
 
     # 构建表格
     add_table_title(doc, "表9  稳健性检验结果")
@@ -567,10 +578,10 @@ def build_robustness_table_docx(doc, df):
     set_cell_text(table.cell(3, 0), "")
     for i, (_, _, model, _, var_name) in enumerate(checks):
         if model and var_name in model.params:
-            set_cell_text(table.cell(3, i + 1), format_tval(model.tvalues[var_name]))
+            set_cell_text(table.cell(3, i + 1), format_tval(_get_tstat(model, var_name)))
 
     # Controls, FE, N, R²
-    row_labels = ["Controls", "Industry FE", "Year FE", "N", "R²"]
+    row_labels = ["Controls", "Firm FE", "Year FE", "N", "R²"]
     for r, label in enumerate(row_labels):
         set_cell_text(table.cell(4 + r, 0), label, alignment=WD_ALIGN_PARAGRAPH.LEFT)
         for i, (_, _, model, n, _) in enumerate(checks):
@@ -639,8 +650,8 @@ def main():
     print("  生成表4 中介效应...")
     build_mediation_table_docx(doc, main_results)
 
-    print("  生成表5 Power 构造比较...")
-    build_power_method_comparison_table_docx(doc, main_results)
+    print("  生成表5 FE-2SLS...")
+    build_causal_table_docx(doc, main_results)
 
     soe_df = df[df["IsSOE"] == 1].copy()
     identified_ratio = soe_df["IsCentralSOE"].notna().mean() if len(soe_df) > 0 else np.nan

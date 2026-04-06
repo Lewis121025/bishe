@@ -139,7 +139,7 @@ def prepare_ml_data(df):
     print(f"  超额薪酬为正样本: {positive_count}")
     print(f"  超额薪酬为负样本: {negative_count}")
     print(f"  正类比例: {positive_ratio:.4%}")
-    print("  判断：类别分布基本均衡，不采用 SMOTE；holdout 使用 GroupShuffleSplit，公司层面隔离，并在分类模型中比较 class_weight/scale_pos_weight。")
+    print("  判断：类别分布基本均衡，不采用 SMOTE；holdout 采用时间切分以避免未来信息泄露，并在分类模型中比较 class_weight/scale_pos_weight。")
 
     return {
         "df_ml": df_ml,
@@ -155,12 +155,17 @@ def prepare_ml_data(df):
     }
 
 
-def create_holdout_splits(X, y, y_class, groups):
-    """按公司标识分组（Group-based Split）进行 80/20 的比例切分，避免面板数据泄露。"""
-    from sklearn.model_selection import GroupShuffleSplit
-    gss = GroupShuffleSplit(n_splits=1, test_size=TEST_SIZE, random_state=RANDOM_STATE)
-    train_idx, test_idx = next(gss.split(X, y, groups))
+def create_holdout_splits(X, y, y_class, df_ml):
+    """基于时间的切割（Time-based Split），前 80% 的年份作为训练集，后 20% 作为测试集，避免未来数据泄露评估。"""
+    unique_years = sorted(df_ml['Year'].unique())
+    split_idx = int(len(unique_years) * (1 - TEST_SIZE))
+    train_years = unique_years[:split_idx]
+    test_years = unique_years[split_idx:]
     
+    train_idx = np.where(df_ml['Year'].isin(train_years))[0]
+    test_idx = np.where(~df_ml['Year'].isin(train_years))[0]
+    groups = df_ml['Symbol']
+
     return {
         "train_idx": train_idx,
         "test_idx": test_idx,
@@ -172,6 +177,8 @@ def create_holdout_splits(X, y, y_class, groups):
         "yc_test": y_class.iloc[test_idx].copy(),
         "groups_train": groups.iloc[train_idx].copy(),
         "groups_test": groups.iloc[test_idx].copy(),
+        "train_years": [int(year) for year in train_years],
+        "test_years": [int(year) for year in test_years],
     }
 
 
@@ -766,9 +773,13 @@ def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_r
             "random_state": RANDOM_STATE,
             "train_size": int(len(splits["train_idx"])),
             "test_size_n": int(len(splits["test_idx"])),
-            "holdout_method": "GroupShuffleSplit",
-            "group_isolation": True,
+            "holdout_method": "Time-based Split",
+            "group_isolation": False,
             "classification_stratified": False,
+            "train_year_start": int(splits["train_years"][0]),
+            "train_year_end": int(splits["train_years"][-1]),
+            "test_year_start": int(splits["test_years"][0]),
+            "test_year_end": int(splits["test_years"][-1]),
         },
         "cross_validation": {
             "folds": CV_FOLDS,
@@ -780,7 +791,11 @@ def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_r
             **class_balance,
             "imbalance_judgment": "不严重失衡",
             "resampling": "未使用SMOTE",
-            "handling": "holdout采用GroupShuffleSplit并保持公司层面隔离；分类模型调参比较 class_weight / scale_pos_weight",
+            "handling": (
+                f"holdout采用时间切分：训练集为{splits['train_years'][0]}—{splits['train_years'][-1]}年，"
+                f"测试集为{splits['test_years'][0]}—{splits['test_years'][-1]}年；"
+                "分类模型调参比较 class_weight / scale_pos_weight"
+            ),
         },
         "search_spaces": {
             "lasso_alpha_grid": list(np.logspace(-4, 1, 60)),
@@ -847,7 +862,7 @@ def main():
     df, _ = build_analysis_dataset(data_dir)
 
     prepared = prepare_ml_data(df)
-    splits = create_holdout_splits(prepared["X"], prepared["y"], prepared["y_class"], prepared["df_ml"]["Symbol"])
+    splits = create_holdout_splits(prepared["X"], prepared["y"], prepared["y_class"], prepared["df_ml"])
 
     print("\n" + "#" * 70)
     print("#  机器学习补充分析开始")

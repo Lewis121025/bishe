@@ -25,6 +25,8 @@ from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
+from linearmodels.panel import PanelOLS
+from linearmodels.iv import IV2SLS
 
 warnings.filterwarnings('ignore')
 
@@ -110,8 +112,8 @@ def _effect_direction_consistent(total_effect, indirect_effect):
     return bool(total_effect * indirect_effect > 0)
 
 
-def _cluster_bootstrap_indirect_effect(x4, y_overpay, x5, y_power, groups, reps, seed, mediator_col="Power"):
-    """公司层面 cluster bootstrap 估计间接效应 a×b 的分布。"""
+def _cluster_bootstrap_indirect_effect(x4, y_overpay, x5, y_power, groups, reps, seed, mediator_col="Power", subsidy_col="lnSubsidy_l1"):
+    """公司层面 cluster bootstrap 估计间接效应 a×b 的分布（基于合并OLS作为近似或传入已去均值数据）。"""
     if reps <= 0:
         return {
             "bootstrap_reps": 0,
@@ -129,7 +131,7 @@ def _cluster_bootstrap_indirect_effect(x4, y_overpay, x5, y_power, groups, reps,
     group_array = pd.Series(groups).astype(str).to_numpy()
 
     power_idx = x4.columns.get_loc(mediator_col)
-    subsidy_idx = x5.columns.get_loc("lnSubsidy")
+    subsidy_idx = x5.columns.get_loc(subsidy_col)
 
     unique_groups = pd.unique(group_array)
     cluster_rows = [np.flatnonzero(group_array == group) for group in unique_groups]
@@ -520,6 +522,21 @@ def construct_variables(df):
     df["SOELevel"] = df["IsCentralSOE"].map({1.0: "央企", 0.0: "地方国企"})
     print(f"   央地分组（仅国有内识别）:\n{df['SOELevel'].value_counts(dropna=False).to_string()}")
 
+    print("9. 构造滞后变量与工具变量...")
+    # 构建滞后一期补贴变量
+    df = df.sort_values(["Symbol", "Year"])
+    df["lnSubsidy_l1"] = df.groupby("Symbol")["lnSubsidy"].shift(1)
+    
+    # 构建工具变量：同城市同年度其他企业的平均补贴
+    city_year_sum = df.groupby(["City", "Year"])["lnSubsidy"].transform(lambda x: x.sum(skipna=True))
+    city_year_count = df.groupby(["City", "Year"])["lnSubsidy"].transform(lambda x: x.count())
+    df["IV_lnSubsidy"] = np.where(
+        city_year_count > 1,
+        (city_year_sum - df["lnSubsidy"].fillna(0)) / (city_year_count - 1),
+        np.nan
+    )
+    df["IV_lnSubsidy_l1"] = df.groupby("Symbol")["IV_lnSubsidy"].shift(1)
+
     print(f"\n变量构造完成。当前列: {list(df.columns)}")
     return df
 
@@ -878,49 +895,143 @@ def compute_power(df, return_diagnostics=False):
 # 第六部分：回归分析
 # ============================================================
 
-def _build_fe_matrix(df_subset, core_vars):
-    """构建包含核心变量 + 行业固定效应 + 年份固定效应的 X 矩阵"""
-    X = df_subset[core_vars].copy()
-    ind_dummies = get_industry_dummies(df_subset)
-    year_dummies = get_year_dummies(df_subset)
-    X = pd.concat([X, ind_dummies, year_dummies], axis=1)
-    X = sm.add_constant(X)
-    return X, len(ind_dummies.columns), len(year_dummies.columns)
+def _within_demean_twoway(df, entity_col, time_col, variables):
+    """双向组内去均值（entity + time），通过交替投影迭代收敛。
 
-def _fit_with_cluster_se(y, X, groups):
-    """OLS 回归 + 公司层面聚类稳健标准误"""
-    model = sm.OLS(y, X).fit(
-        cov_type='cluster',
-        cov_kwds={'groups': groups}
+    用于 bootstrap 前的数据预处理：使 bootstrap 每轮 OLS 等价于双向 FE 估计量，
+    从而保证 bootstrap 分布以分析法点估计为中心，CI 具有正确的统计含义。
+    """
+    vals = df[variables].copy().astype(float)
+    for _ in range(300):
+        prev = vals.values.copy()
+        # 减去 entity（公司）均值
+        vals = vals - vals.groupby(df[entity_col]).transform("mean")
+        # 减去 time（年份）均值
+        vals = vals - vals.groupby(df[time_col]).transform("mean")
+        if np.max(np.abs(vals.values - prev)) < 1e-12:
+            break
+    return vals
+
+
+def _build_fe_matrix(df_subset, core_vars):
+    """构建包含核心变量的 X 矩阵，固定效应由 PanelOLS 原生处理"""
+    X = df_subset[core_vars].copy()
+    X = sm.add_constant(X)
+    return X, 0, 0
+
+def _fit_with_cluster_se(y, X, groups=None):
+    """PanelOLS 回归 + 公司固定效应 + 年份固定效应 + 公司层面聚类稳健标准误"""
+    model = PanelOLS(
+        y,
+        X,
+        entity_effects=True,
+        time_effects=True,
+        drop_absorbed=True,
+        check_rank=False,
     )
-    return model
+    return model.fit(cov_type='clustered', cluster_entity=True)
 
 def _print_core_results(model, core_vars, n_ind, n_year, sample_size, n_clusters=None):
-    """只打印核心变量的回归结果，固定效应只显示'已控制'"""
-    result_table = model.summary2().tables[1]
+    """只打印核心变量的回归结果，固定效应只显示“已控制”"""
+    if hasattr(model, "summary2"):
+        result_table = model.summary2().tables[1]
+    else:
+        # For PanelEffectsResults from linearmodels
+        result_table = pd.DataFrame({
+            "Coef.": model.params,
+            "Std.Err.": model.std_errors,
+            "t": model.tstats,
+            "P>|t|": model.pvalues,
+        })
     core_rows = ["const"] + core_vars
     filtered = result_table.loc[result_table.index.isin(core_rows)]
     print(f"样本量: {sample_size}")
     print(filtered.to_string())
-    print(f"行业固定效应: 已控制 ({n_ind} 个)")
-    print(f"年份固定效应: 已控制 ({n_year} 个)")
+    print("公司固定效应: 已控制")
+    print("年份固定效应: 已控制")
     if n_clusters:
         print(f"聚类标准误: 公司层面 ({n_clusters} 个聚类)")
-    print(f"R² = {model.rsquared:.4f}")
+    
+    rsquared = getattr(model, "rsquared", np.nan)
+    if pd.isna(rsquared) and hasattr(model, "rsquared_within"):
+        rsquared = model.rsquared_within
+    print(f"R² = {rsquared:.4f}")
 
 
-def _summarize_mediation(label, m3, m4, m5, sample_size, n_clusters, mediator_col="Power", mediator_method="FA"):
+def _fit_iv_with_fe(
+    df,
+    control_vars,
+    dep_var="Overpay",
+    endog_col="lnSubsidy_l1",
+    instrument_col="IV_lnSubsidy_l1",
+):
+    """以公司内去均值 + 年份虚拟变量的方式实现 FE-2SLS。"""
+    needed = [dep_var, endog_col, instrument_col, "Symbol", "Year"] + control_vars
+    df_iv = df.dropna(subset=needed).copy()
+    if len(df_iv) < 100:
+        return None
+
+    year_dummies = pd.get_dummies(df_iv["Year"], prefix="Year", drop_first=True, dtype=float)
+    base = pd.concat(
+        [
+            df_iv[["Symbol", "Year", dep_var, endog_col, instrument_col] + control_vars].reset_index(drop=True),
+            year_dummies.reset_index(drop=True),
+        ],
+        axis=1,
+    )
+
+    value_cols = [col for col in base.columns if col not in {"Symbol", "Year"}]
+    base[value_cols] = base[value_cols].astype(float)
+    entity_means = base.groupby("Symbol")[value_cols].transform("mean")
+    transformed = base.copy()
+    transformed[value_cols] = base[value_cols] - entity_means
+
+    exog_cols = control_vars + list(year_dummies.columns)
+    clusters = df_iv["Symbol"].reset_index(drop=True)
+
+    iv_model = IV2SLS(
+        dependent=transformed[dep_var],
+        exog=transformed[exog_cols],
+        endog=transformed[endog_col],
+        instruments=transformed[instrument_col],
+    ).fit(cov_type="clustered", clusters=clusters)
+
+    first_stage_ols = sm.OLS(
+        transformed[endog_col],
+        transformed[exog_cols + [instrument_col]],
+    ).fit(cov_type="cluster", cov_kwds={"groups": clusters})
+
+    diagnostics = iv_model.first_stage.diagnostics.loc[endog_col]
+    return {
+        "model": iv_model,
+        "sample_size": int(len(df_iv)),
+        "n_clusters": int(df_iv["Symbol"].nunique()),
+        "year_fe_count": int(len(year_dummies.columns)),
+        "first_stage": {
+            "instrument": instrument_col,
+            "coef": float(first_stage_ols.params[instrument_col]),
+            "se": float(first_stage_ols.bse[instrument_col]),
+            "p": float(first_stage_ols.pvalues[instrument_col]),
+            "rsquared": float(first_stage_ols.rsquared),
+            "partial_r2": float(diagnostics["partial.rsquared"]),
+            "f_stat": float(diagnostics["f.stat"]),
+            "f_pval": float(diagnostics["f.pval"]),
+        },
+    }
+
+
+def _summarize_mediation(label, m3, m4, m5, sample_size, n_clusters, mediator_col="Power", mediator_method="FA", subsidy_col="lnSubsidy_l1"):
     """汇总 Baron & Kenny 路径系数、Sobel 与 bootstrap 所需字段。"""
-    coef_c = m3.params.get("lnSubsidy", np.nan)
-    p_c = m3.pvalues.get("lnSubsidy", np.nan)
-    coef_c_prime = m4.params.get("lnSubsidy", np.nan)
-    p_c_prime = m4.pvalues.get("lnSubsidy", np.nan)
+    coef_c = m3.params.get(subsidy_col, np.nan)
+    p_c = m3.pvalues.get(subsidy_col, np.nan)
+    coef_c_prime = m4.params.get(subsidy_col, np.nan)
+    p_c_prime = m4.pvalues.get(subsidy_col, np.nan)
     coef_b = m4.params.get(mediator_col, np.nan)
     p_b = m4.pvalues.get(mediator_col, np.nan)
-    se_b = m4.bse.get(mediator_col, np.nan)
-    coef_a = m5.params.get("lnSubsidy", np.nan)
-    p_a = m5.pvalues.get("lnSubsidy", np.nan)
-    se_a = m5.bse.get("lnSubsidy", np.nan)
+    se_b = m4.std_errors.get(mediator_col, np.nan) if hasattr(m4, 'std_errors') else m4.bse.get(mediator_col, np.nan)
+    coef_a = m5.params.get(subsidy_col, np.nan)
+    p_a = m5.pvalues.get(subsidy_col, np.nan)
+    se_a = m5.std_errors.get(subsidy_col, np.nan) if hasattr(m5, 'std_errors') else m5.bse.get(subsidy_col, np.nan)
 
     denominator = np.sqrt(coef_b ** 2 * se_a ** 2 + coef_a ** 2 * se_b ** 2)
     sobel_z = (coef_a * coef_b) / denominator if denominator and not np.isnan(denominator) else np.nan
@@ -963,20 +1074,19 @@ def _summarize_mediation(label, m3, m4, m5, sample_size, n_clusters, mediator_co
         "group_evidence_level": "未评估",
     }
 
-
-def _print_mediation_summary(summary, indent="  "):
+def _print_mediation_summary(summary, indent="  ", subsidy_col="lnSubsidy_l1"):
     """打印中介效应摘要。"""
     print(f"\n{indent}逐步回归法 (Baron & Kenny, 1986):")
     print(
-        f"{indent}  第一步 (模型3) lnSubsidy→Overpay:  "
+        f"{indent}  第一步 (模型3) {subsidy_col}→Overpay:  "
         f"c={summary['coef_c']:.4f} (p={_format_pvalue(summary['p_c'])})"
     )
     print(
-        f"{indent}  第二步 (模型5) lnSubsidy→Power:    "
+        f"{indent}  第二步 (模型5) {subsidy_col}→Power:    "
         f"a={summary['coef_a']:.4f} (p={_format_pvalue(summary['p_a'])})"
     )
     print(
-        f"{indent}  第三步 (模型4) lnSubsidy→Overpay:  "
+        f"{indent}  第三步 (模型4) {subsidy_col}→Overpay:  "
         f"c'={summary['coef_c_prime']:.4f} (p={_format_pvalue(summary['p_c_prime'])})"
     )
     print(
@@ -1009,7 +1119,7 @@ def _print_mediation_summary(summary, indent="  "):
     print(f"{indent}分组严谨口径：{summary.get('group_evidence_level', '未评估')}")
 
 
-def _augment_summary_with_bootstrap(fit_result, reps, seed):
+def _augment_summary_with_bootstrap(fit_result, reps, seed, subsidy_col="lnSubsidy_l1"):
     """为中介检验结果补充 cluster bootstrap 统计量。"""
     bootstrap_result = _cluster_bootstrap_indirect_effect(
         fit_result["x4"],
@@ -1020,6 +1130,7 @@ def _augment_summary_with_bootstrap(fit_result, reps, seed):
         reps=reps,
         seed=seed,
         mediator_col=fit_result["summary"]["mediator_col"],
+        subsidy_col=subsidy_col
     )
     fit_result["summary"].update(bootstrap_result)
     fit_result["summary"]["bootstrap_supported"] = bool(
@@ -1033,25 +1144,28 @@ def _augment_summary_with_bootstrap(fit_result, reps, seed):
     return fit_result
 
 
-def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay", mediator_col="Power", mediator_method="FA"):
+def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay", mediator_col="Power", mediator_method="FA", subsidy_col="lnSubsidy_l1"):
     """在给定样本上统一拟合模型3/4/5并汇总中介效应。"""
-    core3 = ["lnSubsidy"] + control_vars
-    core4 = ["lnSubsidy", mediator_col] + control_vars
-    core5 = ["lnSubsidy"] + control_vars
+    core3 = [subsidy_col] + control_vars
+    core4 = [subsidy_col, mediator_col] + control_vars
+    core5 = [subsidy_col] + control_vars
 
-    needed = core4 + [dep_var, "IndustrySector"]
+    needed = core4 + [dep_var, "IndustrySector", "Year"]
     unified = df_sub.dropna(subset=needed).copy()
     if len(unified) < 80:
         return None
 
     groups = unified["Symbol"]
+    # panelols needs entity and time multiindex
+    unified = unified.set_index(["Symbol", "Year"], drop=False)
+    
     x3, n_ind3, n_year3 = _build_fe_matrix(unified, core3)
     x4, n_ind4, n_year4 = _build_fe_matrix(unified, core4)
     x5, n_ind5, n_year5 = _build_fe_matrix(unified, core5)
 
-    m3 = _fit_with_cluster_se(unified[dep_var], x3, groups)
-    m4 = _fit_with_cluster_se(unified[dep_var], x4, groups)
-    m5 = _fit_with_cluster_se(unified[mediator_col], x5, groups)
+    m3 = _fit_with_cluster_se(unified[dep_var], x3)
+    m4 = _fit_with_cluster_se(unified[dep_var], x4)
+    m5 = _fit_with_cluster_se(unified[mediator_col], x5)
 
     n_unified = len(unified)
     n_clusters = groups.nunique()
@@ -1064,7 +1178,16 @@ def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay", mediat
         n_clusters,
         mediator_col=mediator_col,
         mediator_method=mediator_method,
+        subsidy_col=subsidy_col,
     )
+
+    # 双向组内去均值，使 bootstrap OLS 与 FE 估计量等价
+    # unified 的 Symbol/Year 既是索引也是普通列（drop=False），直接用普通列去均值
+    unified_flat = unified.reset_index(drop=True)
+    all_boot_vars = list(dict.fromkeys(core4 + [dep_var, mediator_col]))
+    demeaned = _within_demean_twoway(unified_flat, "Symbol", "Year", all_boot_vars)
+    x4_boot = sm.add_constant(demeaned[core4])
+    x5_boot = sm.add_constant(demeaned[core5])
 
     return {
         "label": label,
@@ -1072,11 +1195,11 @@ def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay", mediat
         "m3": m3,
         "m4": m4,
         "m5": m5,
-        "x4": x4,
-        "x5": x5,
-        "y4": unified[dep_var],
-        "y5": unified[mediator_col],
-        "groups": groups,
+        "x4": x4_boot.reset_index(drop=True),   # 去均值后传给 bootstrap
+        "x5": x5_boot.reset_index(drop=True),
+        "y4": demeaned[dep_var].reset_index(drop=True),
+        "y5": demeaned[mediator_col].reset_index(drop=True),
+        "groups": groups.reset_index(drop=True),
         "n3": n_unified,
         "n4": n_unified,
         "n5": n_unified,
@@ -1093,26 +1216,27 @@ def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay", mediat
     }
 
 
-def _fit_model3_and_4(df_sub, control_vars):
+def _fit_model3_and_4(df_sub, control_vars, subsidy_col="lnSubsidy_l1"):
     """在给定子样本上拟合模型3和模型4（统一样本）。"""
-    core3 = ["lnSubsidy"] + control_vars
-    core4 = ["lnSubsidy", "Power"] + control_vars
+    core3 = [subsidy_col] + control_vars
+    core4 = [subsidy_col, "Power"] + control_vars
 
     # 统一样本：取模型4所需的全部变量（是模型3的超集）
-    unified = df_sub.dropna(subset=core4 + ["Overpay", "IndustrySector"]).copy()
+    unified = df_sub.dropna(subset=core4 + ["Overpay", "IndustrySector", "Year"]).copy()
 
     if len(unified) < 80:
         return None
 
     groups = unified["Symbol"]
+    unified = unified.set_index(["Symbol", "Year"], drop=False)
 
     x3, n_ind3, n_year3 = _build_fe_matrix(unified, core3)
     y3 = unified["Overpay"]
-    m3 = _fit_with_cluster_se(y3, x3, groups)
+    m3 = _fit_with_cluster_se(y3, x3)
 
     x4, n_ind4, n_year4 = _build_fe_matrix(unified, core4)
     y4 = unified["Overpay"]
-    m4 = _fit_with_cluster_se(y4, x4, groups)
+    m4 = _fit_with_cluster_se(y4, x4)
 
     n_unified = len(unified)
     n_cl = groups.nunique()
@@ -1131,7 +1255,7 @@ def _fit_model3_and_4(df_sub, control_vars):
     }
 
 
-def _print_subsample_model34(label, fit_result):
+def _print_subsample_model34(label, fit_result, subsidy_col="lnSubsidy_l1"):
     """打印子样本的模型3/4核心结果。"""
     m3 = fit_result["m3"]
     m4 = fit_result["m4"]
@@ -1143,12 +1267,12 @@ def _print_subsample_model34(label, fit_result):
         f"模型4 N={fit_result['n4']} (聚类={fit_result['cl4']})"
     )
     print(
-        f"模型3 lnSubsidy={m3.params.get('lnSubsidy', np.nan):.4f} "
-        f"(p={m3.pvalues.get('lnSubsidy', np.nan):.4f}), R²={m3.rsquared:.4f}"
+        f"模型3 {subsidy_col}={m3.params.get(subsidy_col, np.nan):.4f} "
+        f"(p={m3.pvalues.get(subsidy_col, np.nan):.4f}), R²={m3.rsquared:.4f}"
     )
     print(
-        f"模型4 lnSubsidy={m4.params.get('lnSubsidy', np.nan):.4f} "
-        f"(p={m4.pvalues.get('lnSubsidy', np.nan):.4f}), "
+        f"模型4 {subsidy_col}={m4.params.get(subsidy_col, np.nan):.4f} "
+        f"(p={m4.pvalues.get(subsidy_col, np.nan):.4f}), "
         f"Power={m4.params.get('Power', np.nan):.4f} "
         f"(p={m4.pvalues.get('Power', np.nan):.4f}), R²={m4.rsquared:.4f}"
     )
@@ -1160,8 +1284,6 @@ def _build_power_method_comparison(df, control_vars, power_diagnostics=None):
     rows = []
     method_specs = [
         {"method": "FA", "role": "修订后主测度", "power_col": "Power_FA", "diag_key": "fa"},
-        {"method": "熵值法", "role": "稳健性替代", "power_col": "Power_entropy", "diag_key": "entropy"},
-        {"method": "PCA", "role": "原始方案对照", "power_col": "Power_PCA", "diag_key": "pca"},
     ]
 
     for spec in method_specs:
@@ -1225,7 +1347,7 @@ def run_regressions(df, power_diagnostics=None):
     注意：三个模型使用 **同一批样本** 以确保中介效应系数对比有效。
     """
     print("\n" + "=" * 70)
-    print("第六部分：回归分析（含行业 & 年份固定效应）")
+    print("第六部分：回归分析（公司固定效应 + 年份固定效应）")
     print("=" * 70)
 
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
@@ -1240,31 +1362,54 @@ def run_regressions(df, power_diagnostics=None):
         seed=_stable_seed_from_text("全样本"),
     )
     fit_result["summary"]["power_measure_method"] = "FA"
-    df_unified = df.dropna(subset=["lnSubsidy", "Power"] + control_vars + ["Overpay", "IndustrySector"]).copy()
+    df_unified = df.dropna(subset=["lnSubsidy_l1", "Power"] + control_vars + ["Overpay", "IndustrySector", "Year"]).copy()
     print(f"\n统一样本量（模型3/4/5共用）: N = {len(df_unified)}")
     print(f"  聚类数（公司数）: {df_unified['Symbol'].nunique()}")
 
+    # ---- 附加：IV 工具变量因果检验 ----
+    print("\n" + "-" * 50)
+    print("附加因果检验: FE-2SLS (工具变量: 滞后一期同城市同年度其他企业平均补贴)")
+    print("-" * 50)
+    iv_result = _fit_iv_with_fe(df, control_vars)
+    if iv_result is None:
+        raise RuntimeError("IV 样本量不足，无法完成 FE-2SLS。")
+    iv_model = iv_result["model"]
+    first_stage = iv_result["first_stage"]
+    print(iv_model.summary.tables[1])
+    print(
+        "第一阶段工具变量统计量: "
+        f"coef={first_stage['coef']:.4f}, "
+        f"Partial R²={first_stage['partial_r2']:.4f}, "
+        f"Partial F={first_stage['f_stat']:.2f}, "
+        f"p={_format_pvalue(first_stage['f_pval'])}"
+    )
+    print(
+        f"IV 回归样本量: {iv_result['sample_size']}，"
+        f"聚类数: {iv_result['n_clusters']}，"
+        f"年份固定效应: {iv_result['year_fe_count']} 个"
+    )
+
     # ---- 模型3：基准回归 ----
     print("\n" + "-" * 50)
-    print("模型3: Overpay = f(lnSubsidy, Controls, ΣIndustry, ΣYear)")
+    print("模型3: Overpay = f(lnSubsidy_l1, Controls, Firm FE, Year FE)")
     print("-" * 50)
-    core3 = ["lnSubsidy"] + control_vars
+    core3 = ["lnSubsidy_l1"] + control_vars
     model3 = fit_result["m3"]
     _print_core_results(model3, core3, fit_result["ind3"], fit_result["year3"], len(df_unified), fit_result["cl3"])
 
     # ---- 模型4：加入管理层权力（FA 修订后主测度） ----
     print("\n" + "-" * 50)
-    print("模型4: Overpay = f(lnSubsidy, Power[FA修订后主测度], Controls, ΣIndustry, ΣYear)")
+    print("模型4: Overpay = f(lnSubsidy_l1, Power[FA], Controls, Firm FE, Year FE)")
     print("-" * 50)
-    core4 = ["lnSubsidy", "Power"] + control_vars
+    core4 = ["lnSubsidy_l1", "Power"] + control_vars
     model4 = fit_result["m4"]
     _print_core_results(model4, core4, fit_result["ind4"], fit_result["year4"], len(df_unified), fit_result["cl4"])
 
     # ---- 模型5：政府补助对管理层权力（FA 修订后主测度） ----
     print("\n" + "-" * 50)
-    print("模型5: Power[FA修订后主测度] = f(lnSubsidy, Controls, ΣIndustry, ΣYear)")
+    print("模型5: Power[FA] = f(lnSubsidy_l1, Controls, Firm FE, Year FE)")
     print("-" * 50)
-    core5 = ["lnSubsidy"] + control_vars
+    core5 = ["lnSubsidy_l1"] + control_vars
     model5 = fit_result["m5"]
     _print_core_results(model5, core5, fit_result["ind5"], fit_result["year5"], len(df_unified), fit_result["cl5"])
 
@@ -1280,6 +1425,7 @@ def run_regressions(df, power_diagnostics=None):
         "model3": model3,
         "model4": model4,
         "model5": model5,
+        "iv_result": iv_result,
         "summary": fit_result["summary"],
         "fit_result": fit_result,
         "method_comparison": method_comparison,
@@ -1302,6 +1448,7 @@ def heterogeneity_analysis(df):
         ("国有企业", df["IsSOE"] == 1),
         ("私营企业", df["IsPrivate"] == 1),
     ]
+    rows = []
 
     for label, mask in group_specs:
         df_sub = df[mask].copy()
@@ -1310,6 +1457,22 @@ def heterogeneity_analysis(df):
             print(f"  样本量不足 ({len(df_sub)})，跳过。")
             continue
         _print_subsample_model34(label, fit_result)
+        rows.append({
+            "group_type": "产权性质",
+            "group": label,
+            "sample_size": fit_result["n3"],
+            "n_clusters": fit_result["cl3"],
+            "coef_model3": float(fit_result["m3"].params.get("lnSubsidy_l1", np.nan)),
+            "p_model3": float(fit_result["m3"].pvalues.get("lnSubsidy_l1", np.nan)),
+            "r2_model3": float(fit_result["m3"].rsquared),
+            "coef_model4": float(fit_result["m4"].params.get("lnSubsidy_l1", np.nan)),
+            "p_model4": float(fit_result["m4"].pvalues.get("lnSubsidy_l1", np.nan)),
+            "power_coef": float(fit_result["m4"].params.get("Power", np.nan)),
+            "power_p": float(fit_result["m4"].pvalues.get("Power", np.nan)),
+            "r2_model4": float(fit_result["m4"].rsquared),
+        })
+
+    return pd.DataFrame(rows)
 
 
 def mechanism_analysis(df):
@@ -1323,6 +1486,7 @@ def mechanism_analysis(df):
     print("=" * 70)
 
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
+    rows = []
 
     # ---- A. 管制行业 vs 非管制行业 ----
     print("\n[机制A] 管制行业 vs 非管制行业")
@@ -1333,6 +1497,20 @@ def mechanism_analysis(df):
             print(f"  {label}样本不足，跳过。")
             continue
         _print_subsample_model34(label, fit_result)
+        rows.append({
+            "group_type": "行业管制",
+            "group": label,
+            "sample_size": fit_result["n3"],
+            "n_clusters": fit_result["cl3"],
+            "coef_model3": float(fit_result["m3"].params.get("lnSubsidy_l1", np.nan)),
+            "p_model3": float(fit_result["m3"].pvalues.get("lnSubsidy_l1", np.nan)),
+            "r2_model3": float(fit_result["m3"].rsquared),
+            "coef_model4": float(fit_result["m4"].params.get("lnSubsidy_l1", np.nan)),
+            "p_model4": float(fit_result["m4"].pvalues.get("lnSubsidy_l1", np.nan)),
+            "power_coef": float(fit_result["m4"].params.get("Power", np.nan)),
+            "power_p": float(fit_result["m4"].pvalues.get("Power", np.nan)),
+            "r2_model4": float(fit_result["m4"].rsquared),
+        })
 
     # ---- B. 央企 vs 地方国企 ----
     print("\n[机制B] 央企 vs 地方国企（国有样本）")
@@ -1347,6 +1525,22 @@ def mechanism_analysis(df):
             print(f"  {label}样本不足，跳过。")
             continue
         _print_subsample_model34(label, fit_result)
+        rows.append({
+            "group_type": "央地国企",
+            "group": label,
+            "sample_size": fit_result["n3"],
+            "n_clusters": fit_result["cl3"],
+            "coef_model3": float(fit_result["m3"].params.get("lnSubsidy_l1", np.nan)),
+            "p_model3": float(fit_result["m3"].pvalues.get("lnSubsidy_l1", np.nan)),
+            "r2_model3": float(fit_result["m3"].rsquared),
+            "coef_model4": float(fit_result["m4"].params.get("lnSubsidy_l1", np.nan)),
+            "p_model4": float(fit_result["m4"].pvalues.get("lnSubsidy_l1", np.nan)),
+            "power_coef": float(fit_result["m4"].params.get("Power", np.nan)),
+            "power_p": float(fit_result["m4"].pvalues.get("Power", np.nan)),
+            "r2_model4": float(fit_result["m4"].rsquared),
+        })
+
+    return pd.DataFrame(rows)
 
 
 def get_grouped_mediation_specs(df):
@@ -1509,93 +1703,143 @@ def vif_diagnostics(df):
 # ============================================================
 
 def robustness_checks(df):
-    """稳健性检验：替换变量、样本期缩减、极值处理、行业子样本、滞后项。"""
+    """稳健性检验：替换变量、样本期缩减、极值处理、行业子样本。"""
     print("\n" + "=" * 70)
     print("第十二部分：稳健性检验")
     print("=" * 70)
 
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
-    core_vars = ["lnSubsidy"] + control_vars
+    core_vars = ["lnSubsidy_l1"] + control_vars
+    rows = []
 
     # --- 稳健性1：替换被解释变量（薪酬对数替代超额薪酬） ---
     print("\n  [稳健性1] 替换被解释变量: 使用 lnCEOpay 替代 Overpay")
-    df_r1 = df.dropna(subset=core_vars + ["lnCEOpay", "IndustrySector"]).copy()
-    X_r1, n_ind, n_year = _build_fe_matrix(df_r1, core_vars)
-    m_r1 = _fit_with_cluster_se(df_r1["lnCEOpay"], X_r1, df_r1["Symbol"])
-    coef = m_r1.params.get("lnSubsidy", np.nan)
-    pval = m_r1.pvalues.get("lnSubsidy", np.nan)
-    print(f"    lnSubsidy 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r1.rsquared:.4f}")
-    print(f"    N={len(df_r1)}, 聚类={df_r1['Symbol'].nunique()}个")
-    print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
+    df_r1 = df.dropna(subset=core_vars + ["lnCEOpay", "Year"]).copy()
+    if len(df_r1) > 100:
+        df_r1 = df_r1.set_index(["Symbol", "Year"], drop=False)
+        X_r1, _, _ = _build_fe_matrix(df_r1, core_vars)
+        m_r1 = _fit_with_cluster_se(df_r1["lnCEOpay"], X_r1)
+        coef = m_r1.params.get("lnSubsidy_l1", np.nan)
+        pval = m_r1.pvalues.get("lnSubsidy_l1", np.nan)
+        print(f"    lnSubsidy_l1 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r1.rsquared:.4f}")
+        print(f"    N={len(df_r1)}, 聚类={df_r1['Symbol'].nunique()}个")
+        print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
+        rows.append({
+            "check_item": "替换因变量",
+            "dependent_var": "lnCEOpay",
+            "key_var": "lnSubsidy_l1",
+            "coef": float(coef),
+            "t_value": float(m_r1.tstats.get("lnSubsidy_l1", np.nan)),
+            "p_value": float(pval),
+            "sample_size": int(len(df_r1)),
+            "n_clusters": int(df_r1["Symbol"].nunique()),
+            "r_squared": float(m_r1.rsquared),
+        })
 
     # --- 稳健性2：缩小样本期间（2010-2020） ---
     print("\n  [稳健性2] 缩小样本期间: 2010-2020年")
     df_r2 = df[(df["Year"] >= 2010) & (df["Year"] <= 2020)].copy()
-    df_r2 = df_r2.dropna(subset=core_vars + ["Overpay", "IndustrySector"])
+    df_r2 = df_r2.dropna(subset=core_vars + ["Overpay", "Year"])
     if len(df_r2) > 100:
+        df_r2 = df_r2.set_index(["Symbol", "Year"], drop=False)
         X_r2, _, _ = _build_fe_matrix(df_r2, core_vars)
-        m_r2 = _fit_with_cluster_se(df_r2["Overpay"], X_r2, df_r2["Symbol"])
-        coef = m_r2.params.get("lnSubsidy", np.nan)
-        pval = m_r2.pvalues.get("lnSubsidy", np.nan)
-        print(f"    lnSubsidy 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r2.rsquared:.4f}")
+        m_r2 = _fit_with_cluster_se(df_r2["Overpay"], X_r2)
+        coef = m_r2.params.get("lnSubsidy_l1", np.nan)
+        pval = m_r2.pvalues.get("lnSubsidy_l1", np.nan)
+        print(f"    lnSubsidy_l1 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r2.rsquared:.4f}")
         print(f"    N={len(df_r2)}, 聚类={df_r2['Symbol'].nunique()}个")
         print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
+        rows.append({
+            "check_item": "缩小样本期(2010-2020)",
+            "dependent_var": "Overpay",
+            "key_var": "lnSubsidy_l1",
+            "coef": float(coef),
+            "t_value": float(m_r2.tstats.get("lnSubsidy_l1", np.nan)),
+            "p_value": float(pval),
+            "sample_size": int(len(df_r2)),
+            "n_clusters": int(df_r2["Symbol"].nunique()),
+            "r_squared": float(m_r2.rsquared),
+        })
 
     # --- 稳健性3：剔除极端补助值（上下5%） ---
     print("\n  [稳健性3] 剔除极端补助值（5%/95%分位数外）")
-    q05 = df["lnSubsidy"].quantile(0.05)
-    q95 = df["lnSubsidy"].quantile(0.95)
-    df_r3 = df[(df["lnSubsidy"] >= q05) & (df["lnSubsidy"] <= q95)].copy()
-    df_r3 = df_r3.dropna(subset=core_vars + ["Overpay", "IndustrySector"])
+    q05 = df["lnSubsidy_l1"].quantile(0.05)
+    q95 = df["lnSubsidy_l1"].quantile(0.95)
+    df_r3 = df[(df["lnSubsidy_l1"] >= q05) & (df["lnSubsidy_l1"] <= q95)].copy()
+    df_r3 = df_r3.dropna(subset=core_vars + ["Overpay", "Year"])
     if len(df_r3) > 100:
+        df_r3 = df_r3.set_index(["Symbol", "Year"], drop=False)
         X_r3, _, _ = _build_fe_matrix(df_r3, core_vars)
-        m_r3 = _fit_with_cluster_se(df_r3["Overpay"], X_r3, df_r3["Symbol"])
-        coef = m_r3.params.get("lnSubsidy", np.nan)
-        pval = m_r3.pvalues.get("lnSubsidy", np.nan)
-        print(f"    lnSubsidy 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r3.rsquared:.4f}")
+        m_r3 = _fit_with_cluster_se(df_r3["Overpay"], X_r3)
+        coef = m_r3.params.get("lnSubsidy_l1", np.nan)
+        pval = m_r3.pvalues.get("lnSubsidy_l1", np.nan)
+        print(f"    lnSubsidy_l1 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r3.rsquared:.4f}")
         print(f"    N={len(df_r3)}, 聚类={df_r3['Symbol'].nunique()}个")
         print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
+        rows.append({
+            "check_item": "剔除极端补助值",
+            "dependent_var": "Overpay",
+            "key_var": "lnSubsidy_l1",
+            "coef": float(coef),
+            "t_value": float(m_r3.tstats.get("lnSubsidy_l1", np.nan)),
+            "p_value": float(pval),
+            "sample_size": int(len(df_r3)),
+            "n_clusters": int(df_r3["Symbol"].nunique()),
+            "r_squared": float(m_r3.rsquared),
+        })
 
     # --- 稳健性4：仅制造业样本 ---
     print("\n  [稳健性4] 仅制造业样本")
     df_r4 = df[df["Industry"] == 1].copy()
-    df_r4 = df_r4.dropna(subset=core_vars + ["Overpay", "IndustrySector"])
+    df_r4 = df_r4.dropna(subset=core_vars + ["Overpay", "Year"])
     if len(df_r4) > 100:
+        df_r4 = df_r4.set_index(["Symbol", "Year"], drop=False)
         X_r4, _, _ = _build_fe_matrix(df_r4, core_vars)
-        m_r4 = _fit_with_cluster_se(df_r4["Overpay"], X_r4, df_r4["Symbol"])
-        coef = m_r4.params.get("lnSubsidy", np.nan)
-        pval = m_r4.pvalues.get("lnSubsidy", np.nan)
-        print(f"    lnSubsidy 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r4.rsquared:.4f}")
+        m_r4 = _fit_with_cluster_se(df_r4["Overpay"], X_r4)
+        coef = m_r4.params.get("lnSubsidy_l1", np.nan)
+        pval = m_r4.pvalues.get("lnSubsidy_l1", np.nan)
+        print(f"    lnSubsidy_l1 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r4.rsquared:.4f}")
         print(f"    N={len(df_r4)}, 聚类={df_r4['Symbol'].nunique()}个")
         print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
+        rows.append({
+            "check_item": "仅制造业",
+            "dependent_var": "Overpay",
+            "key_var": "lnSubsidy_l1",
+            "coef": float(coef),
+            "t_value": float(m_r4.tstats.get("lnSubsidy_l1", np.nan)),
+            "p_value": float(pval),
+            "sample_size": int(len(df_r4)),
+            "n_clusters": int(df_r4["Symbol"].nunique()),
+            "r_squared": float(m_r4.rsquared),
+        })
 
-    # --- 稳健性5：替换核心解释变量为 ln(1+补助) ---
-    print("\n  [稳健性5] 替换解释变量: 使用 lnSubsidy1p")
-    core_vars_alt = ["lnSubsidy1p"] + control_vars
-    df_r5 = df.dropna(subset=core_vars_alt + ["Overpay", "IndustrySector"]).copy()
+    # --- 稳健性5：替换核心解释变量为 ln(1+补助_l1) ---
+    print("\n  [稳健性5] 替换解释变量: 使用 lnSubsidy1p_l1")
+    df["lnSubsidy1p_l1"] = df.groupby("Symbol")["lnSubsidy1p"].shift(1)
+    core_vars_alt = ["lnSubsidy1p_l1"] + control_vars
+    df_r5 = df.dropna(subset=core_vars_alt + ["Overpay", "Year"]).copy()
     if len(df_r5) > 100:
+        df_r5 = df_r5.set_index(["Symbol", "Year"], drop=False)
         X_r5, _, _ = _build_fe_matrix(df_r5, core_vars_alt)
-        m_r5 = _fit_with_cluster_se(df_r5["Overpay"], X_r5, df_r5["Symbol"])
-        coef = m_r5.params.get("lnSubsidy1p", np.nan)
-        pval = m_r5.pvalues.get("lnSubsidy1p", np.nan)
-        print(f"    lnSubsidy1p 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r5.rsquared:.4f}")
+        m_r5 = _fit_with_cluster_se(df_r5["Overpay"], X_r5)
+        coef = m_r5.params.get("lnSubsidy1p_l1", np.nan)
+        pval = m_r5.pvalues.get("lnSubsidy1p_l1", np.nan)
+        print(f"    lnSubsidy1p_l1 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r5.rsquared:.4f}")
         print(f"    N={len(df_r5)}, 聚类={df_r5['Symbol'].nunique()}个")
         print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
+        rows.append({
+            "check_item": "替换解释变量ln(1+补助)",
+            "dependent_var": "Overpay",
+            "key_var": "lnSubsidy1p_l1",
+            "coef": float(coef),
+            "t_value": float(m_r5.tstats.get("lnSubsidy1p_l1", np.nan)),
+            "p_value": float(pval),
+            "sample_size": int(len(df_r5)),
+            "n_clusters": int(df_r5["Symbol"].nunique()),
+            "r_squared": float(m_r5.rsquared),
+        })
 
-    # --- 稳健性6：滞后一期政府补助 ---
-    print("\n  [稳健性6] 使用滞后一期补助变量 lnSubsidy_l1")
-    df_lag = df.sort_values(["Symbol", "Year"]).copy()
-    df_lag["lnSubsidy_l1"] = df_lag.groupby("Symbol")["lnSubsidy"].shift(1)
-    core_vars_lag = ["lnSubsidy_l1"] + control_vars
-    df_r6 = df_lag.dropna(subset=core_vars_lag + ["Overpay", "IndustrySector"]).copy()
-    if len(df_r6) > 100:
-        X_r6, _, _ = _build_fe_matrix(df_r6, core_vars_lag)
-        m_r6 = _fit_with_cluster_se(df_r6["Overpay"], X_r6, df_r6["Symbol"])
-        coef = m_r6.params.get("lnSubsidy_l1", np.nan)
-        pval = m_r6.pvalues.get("lnSubsidy_l1", np.nan)
-        print(f"    lnSubsidy_l1 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r6.rsquared:.4f}")
-        print(f"    N={len(df_r6)}, 聚类={df_r6['Symbol'].nunique()}个")
-        print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
+    return pd.DataFrame(rows)
 
 
 # ============================================================
@@ -1612,7 +1856,15 @@ def build_analysis_dataset(data_dir):
     return df, power_diagnostics
 
 
-def save_structured_outputs(output_dir, power_diagnostics, main_regression, grouped_mediation_df):
+def save_structured_outputs(
+    output_dir,
+    power_diagnostics,
+    main_regression,
+    grouped_mediation_df,
+    ownership_df,
+    mechanism_df,
+    robustness_df,
+):
     """保存供文稿复用的结构化结果。"""
     os.makedirs(output_dir, exist_ok=True)
 
@@ -1686,9 +1938,124 @@ def save_structured_outputs(output_dir, power_diagnostics, main_regression, grou
         index=False
     )
 
+    iv_result = main_regression.get("iv_result", {})
+    iv_model = iv_result.get("model")
+    first_stage = iv_result.get("first_stage", {})
+    model3 = main_regression.get("model3")
+    model4 = main_regression.get("model4")
+    model5 = main_regression.get("model5")
+    mediation = main_regression.get("summary", {})
+    causal_rows = []
+    if model3 is not None:
+        causal_rows.append({
+            "category": "双向固定效应",
+            "model": "模型3-滞后补贴",
+            "key_var": "lnSubsidy_l1",
+            "coef": float(model3.params.get("lnSubsidy_l1", np.nan)),
+            "se": float(model3.std_errors.get("lnSubsidy_l1", np.nan)),
+            "p": float(model3.pvalues.get("lnSubsidy_l1", np.nan)),
+            "n": int(mediation.get("sample_size", np.nan)),
+            "r2": float(model3.rsquared),
+            "note": "公司固定效应+年份固定效应+公司层面聚类稳健标准误",
+        })
+    if iv_model is not None:
+        causal_rows.append({
+            "category": "IV-第一阶段",
+            "model": "FE-2SLS_FS",
+            "key_var": first_stage.get("instrument", "IV_lnSubsidy_l1"),
+            "coef": float(first_stage.get("coef", np.nan)),
+            "se": float(first_stage.get("se", np.nan)),
+            "p": float(first_stage.get("p", np.nan)),
+            "n": int(iv_result.get("sample_size", np.nan)),
+            "r2": float(first_stage.get("rsquared", np.nan)),
+            "note": (
+                f"公司固定效应经公司内去均值吸收，年份固定效应已控制；"
+                f"Partial R²={first_stage.get('partial_r2', np.nan):.4f}; "
+                f"Partial F={first_stage.get('f_stat', np.nan):.2f}"
+            ),
+        })
+        causal_rows.append({
+            "category": "IV-第二阶段",
+            "model": "FE-2SLS_SS",
+            "key_var": "lnSubsidy_l1",
+            "coef": float(iv_model.params.get("lnSubsidy_l1", np.nan)),
+            "se": float(iv_model.std_errors.get("lnSubsidy_l1", np.nan)),
+            "p": float(iv_model.pvalues.get("lnSubsidy_l1", np.nan)),
+            "n": int(iv_result.get("sample_size", np.nan)),
+            "r2": float(iv_model.rsquared),
+            "note": "公司固定效应经公司内去均值吸收，年份固定效应已控制",
+        })
+    if model4 is not None:
+        causal_rows.append({
+            "category": "中介效应FA",
+            "model": "路径c'-控制Power",
+            "key_var": "lnSubsidy_l1→Overpay|Power",
+            "coef": float(mediation.get("coef_c_prime", np.nan)),
+            "se": float(model4.std_errors.get("lnSubsidy_l1", np.nan)),
+            "p": float(mediation.get("p_c_prime", np.nan)),
+            "n": int(mediation.get("sample_size", np.nan)),
+            "r2": float(model4.rsquared),
+            "note": "FA口径；公司固定效应+年份固定效应",
+        })
+        causal_rows.append({
+            "category": "中介效应FA",
+            "model": "路径b-权力→薪酬",
+            "key_var": "Power_FA→Overpay",
+            "coef": float(mediation.get("coef_b", np.nan)),
+            "se": float(model4.std_errors.get("Power", np.nan)),
+            "p": float(mediation.get("p_b", np.nan)),
+            "n": int(mediation.get("sample_size", np.nan)),
+            "r2": float(model4.rsquared),
+            "note": "FA口径；公司固定效应+年份固定效应",
+        })
+    if model5 is not None:
+        causal_rows.append({
+            "category": "中介效应FA",
+            "model": "路径a-补贴→权力",
+            "key_var": "lnSubsidy_l1→Power_FA",
+            "coef": float(mediation.get("coef_a", np.nan)),
+            "se": float(model5.std_errors.get("lnSubsidy_l1", np.nan)),
+            "p": float(mediation.get("p_a", np.nan)),
+            "n": int(mediation.get("sample_size", np.nan)),
+            "r2": float(model5.rsquared),
+            "note": "FA口径；公司固定效应+年份固定效应",
+        })
+    causal_rows.append({
+        "category": "中介效应FA",
+        "model": "间接效应a×b",
+        "key_var": "indirect",
+        "coef": float(mediation.get("indirect_effect", np.nan)),
+        "se": np.nan,
+        "p": float(mediation.get("sobel_p", np.nan)),
+        "n": int(mediation.get("sample_size", np.nan)),
+        "r2": np.nan,
+        "note": (
+            f"Sobel Z={mediation.get('sobel_z', np.nan):.4f}; "
+            f"Bootstrap 95%CI=[{mediation.get('bootstrap_ci_lower', np.nan):.6f},"
+            f"{mediation.get('bootstrap_ci_upper', np.nan):.6f}]; "
+            f"中介占比={mediation.get('mediation_ratio_pct', np.nan):.2f}%"
+        ),
+    })
+    pd.DataFrame(causal_rows).to_csv(
+        os.path.join(output_dir, "causal_results.csv"),
+        index=False,
+    )
+
     grouped_mediation_df.to_csv(
         os.path.join(output_dir, "grouped_mediation_results.csv"),
         index=False
+    )
+    ownership_df.to_csv(
+        os.path.join(output_dir, "heterogeneity_ownership_results.csv"),
+        index=False,
+    )
+    mechanism_df.to_csv(
+        os.path.join(output_dir, "heterogeneity_mechanism_results.csv"),
+        index=False,
+    )
+    robustness_df.to_csv(
+        os.path.join(output_dir, "robustness_results.csv"),
+        index=False,
     )
 
 
@@ -1709,10 +2076,10 @@ def main():
     main_regression = run_regressions(df, power_diagnostics)
 
     # 7. 异质性分析（分产权）
-    heterogeneity_analysis(df)
+    ownership_df = heterogeneity_analysis(df)
 
     # 8. 机制检验（管制/非管制、央企/地方国企）
-    mechanism_analysis(df)
+    mechanism_df = mechanism_analysis(df)
 
     # 9. 分组中介效应
     grouped_mediation_df = grouped_mediation_analysis(df)
@@ -1724,12 +2091,20 @@ def main():
     vif_diagnostics(df)
 
     # 12. 稳健性检验
-    robustness_checks(df)
+    robustness_df = robustness_checks(df)
 
     # 保存最终数据集
     output_file = os.path.join(output_dir, "regression_dataset.csv")
     df.to_csv(output_file, index=False)
-    save_structured_outputs(output_dir, power_diagnostics, main_regression, grouped_mediation_df)
+    save_structured_outputs(
+        output_dir,
+        power_diagnostics,
+        main_regression,
+        grouped_mediation_df,
+        ownership_df,
+        mechanism_df,
+        robustness_df,
+    )
     print(f"\n最终分析数据集已保存至: {output_file}")
     print(f"总行数: {len(df)}, 总列数: {len(df.columns)}")
 
