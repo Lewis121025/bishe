@@ -581,8 +581,8 @@ def filter_and_describe(df):
     print("表1 主要变量描述性统计")
     print("-" * 50)
 
-    desc_vars = ["Top3Salary", "SubsidyAmount", "Roa", "Lever", "Top1",
-                 "lnCEOpay", "lnSubsidy"]
+    desc_vars = ["Top3Salary", "SubsidyAmount", "lnSubsidy", "lnCEOpay",
+                 "lnSale", "IA", "Roa", "Lever", "Top1", "Zone"]
     available_desc = [v for v in desc_vars if v in df_clean.columns]
     desc = df_clean[available_desc].describe().T
     desc = desc[["count", "mean", "std", "min", "50%", "max"]]
@@ -594,6 +594,35 @@ def filter_and_describe(df):
 
     print(f"\n年度分布:")
     print(df_clean["Year"].value_counts().sort_index())
+
+    # ---- 相关性矩阵与 VIF 检验 ----
+    print("\n" + "-" * 50)
+    print("相关性矩阵（皮尔逊相关系数）")
+    print("-" * 50)
+    corr_vars = [v for v in ["lnSubsidy", "lnSale", "Roa", "IA", "Lever", "Top1", "Zone"]
+                 if v in df_clean.columns]
+    corr_matrix = df_clean[corr_vars].corr()
+    print(corr_matrix.to_string(float_format=lambda x: f"{x:.4f}"))
+
+    print("\n" + "-" * 50)
+    print("方差膨胀因子（VIF）检验")
+    print("-" * 50)
+    try:
+        from statsmodels.stats.outliers_influence import variance_inflation_factor
+        vif_data = df_clean[corr_vars].dropna()
+        X_vif = sm.add_constant(vif_data)
+        vif_results = []
+        for i, col in enumerate(X_vif.columns):
+            if col == "const":
+                continue
+            vif_val = variance_inflation_factor(X_vif.values, i)
+            vif_results.append({"变量": col, "VIF": round(vif_val, 4)})
+        import pandas as pd
+        vif_df = pd.DataFrame(vif_results)
+        print(vif_df.to_string(index=False))
+        print(f"最大VIF = {vif_df['VIF'].max():.4f}，均值 = {vif_df['VIF'].mean():.4f}")
+    except Exception as e:
+        print(f"VIF 计算出错: {e}")
 
     return df_clean
 
@@ -1217,7 +1246,10 @@ def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay", mediat
 
 
 def _fit_model3_and_4(df_sub, control_vars, subsidy_col="lnSubsidy_l1"):
-    """在给定子样本上拟合模型3和模型4（统一样本）。"""
+    """在给定子样本上拟合模型3和模型4（统一样本）。
+    保持原有统一样本逻辑（要求 Power 非缺失），以确保两个模型的样本一致，
+    结果可以直接比较。表格呈现层面可选择只展示模型3列。
+    """
     core3 = [subsidy_col] + control_vars
     core4 = [subsidy_col, "Power"] + control_vars
 
@@ -1761,34 +1793,7 @@ def robustness_checks(df):
             "r_squared": float(m_r2.rsquared),
         })
 
-    # --- 稳健性3：剔除极端补助值（上下5%） ---
-    print("\n  [稳健性3] 剔除极端补助值（5%/95%分位数外）")
-    q05 = df["lnSubsidy_l1"].quantile(0.05)
-    q95 = df["lnSubsidy_l1"].quantile(0.95)
-    df_r3 = df[(df["lnSubsidy_l1"] >= q05) & (df["lnSubsidy_l1"] <= q95)].copy()
-    df_r3 = df_r3.dropna(subset=core_vars + ["Overpay", "Year"])
-    if len(df_r3) > 100:
-        df_r3 = df_r3.set_index(["Symbol", "Year"], drop=False)
-        X_r3, _, _ = _build_fe_matrix(df_r3, core_vars)
-        m_r3 = _fit_with_cluster_se(df_r3["Overpay"], X_r3)
-        coef = m_r3.params.get("lnSubsidy_l1", np.nan)
-        pval = m_r3.pvalues.get("lnSubsidy_l1", np.nan)
-        print(f"    lnSubsidy_l1 系数 = {coef:.4f} (p={pval:.4f}), R² = {m_r3.rsquared:.4f}")
-        print(f"    N={len(df_r3)}, 聚类={df_r3['Symbol'].nunique()}个")
-        print(f"    {'→ 显著，结论稳健 ✓' if pval < 0.05 else '→ 不显著 ✗'}")
-        rows.append({
-            "check_item": "剔除极端补助值",
-            "dependent_var": "Overpay",
-            "key_var": "lnSubsidy_l1",
-            "coef": float(coef),
-            "t_value": float(m_r3.tstats.get("lnSubsidy_l1", np.nan)),
-            "p_value": float(pval),
-            "sample_size": int(len(df_r3)),
-            "n_clusters": int(df_r3["Symbol"].nunique()),
-            "r_squared": float(m_r3.rsquared),
-        })
-
-    # --- 稳健性4：仅制造业样本 ---
+    # --- 稳健性3（原稳健性4）：仅制造业样本 ---
     print("\n  [稳健性4] 仅制造业样本")
     df_r4 = df[df["Industry"] == 1].copy()
     df_r4 = df_r4.dropna(subset=core_vars + ["Overpay", "Year"])
