@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
 from regression_analysis import (
     build_analysis_dataset,
     run_regressions,
-    grouped_mediation_analysis,
+    _fit_expectation_salary_model,
     _build_fe_matrix,
     _fit_with_cluster_se,
 )
@@ -76,6 +76,16 @@ def _get_std_error(model, var_name):
     if hasattr(model, "std_errors") and var_name in model.std_errors:
         return model.std_errors[var_name]
     return model.bse[var_name]
+
+
+def _get_fstat(model):
+    stat = getattr(model, "f_statistic_robust", None)
+    if stat is not None and getattr(stat, "stat", None) is not None:
+        return float(stat.stat)
+    stat = getattr(model, "f_statistic", None)
+    if stat is not None and getattr(stat, "stat", None) is not None:
+        return float(stat.stat)
+    return np.nan
 
 
 def fit_model(df, dep_var, core_vars, df_pre=None):
@@ -199,12 +209,16 @@ def build_desc_table_docx(doc, df):
     desc_vars_map = {
         "Top3Salary": "高管前三名薪酬总额",
         "SubsidyAmount": "政府补助",
+        "lnSubsidy": "财政补贴强度(lnSubsidy)",
+        "lnCEOpay": "薪酬对数(lnCEOpay)",
+        "lnSale": "企业规模(lnSale)",
+        "IA": "无形资产占比(IA)",
         "Overpay": "超额薪酬(Overpay)",
         "Power": "管理层权力(Power, FA)",
         "Roa": "资产收益率(Roa)",
-        "Revenue": "营业收入",
         "Lever": "财务杠杆(Lever)",
         "Top1": "第一大股东持股比例(Top1)",
+        "Zone": "地区(Zone, 中西部=1)",
     }
 
     headers = ["变量", "N", "均值", "中位数", "标准差", "最小值", "最大值"]
@@ -230,19 +244,20 @@ def build_desc_table_docx(doc, df):
             set_cell_text(table.cell(r + 1, c), val, alignment=align)
 
     apply_three_line_style(table, header_rows=1)
-    add_table_note(doc, "注：薪酬和政府补助单位为元，连续变量已进行1%/99%缩尾处理。")
+    add_table_note(doc, "注：薪酬和政府补助单位为元。Overpay 直接使用模型1残差，不再进行二次缩尾；其余连续变量按 1%/99% 分位数缩尾处理。Zone 为虚拟变量，其中中西部=1、东部=0。")
 
 
 def build_first_stage_table_docx(doc, df):
     """表2 第一阶段期望薪酬模型。"""
-    core_vars = ["lnSale", "Roa", "IA", "Zone"]
-    model, n = fit_model(df, "lnCEOpay", core_vars)
+    fit_result = _fit_expectation_salary_model(df)
+    model = fit_result["model"]
+    n = len(fit_result["df_model1"])
 
     explanations = {
         "lnSale": "企业规模越大，期望薪酬越高",
         "Roa": "盈利能力越强，期望薪酬越高",
         "IA": "无形资产占比较高时，期望薪酬相对较低",
-        "Zone": "中西部地区样本的期望薪酬相对较低",
+        "Zone": "在中西部=1的定义下，负系数表示中西部期望薪酬低于东部",
     }
     display_vars = ["lnSale", "Roa", "IA", "Zone"]
 
@@ -276,7 +291,7 @@ def build_first_stage_table_docx(doc, df):
         row_idx += 1
 
     apply_three_line_style(table, header_rows=1)
-    add_table_note(doc, "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。该模型用于估计正常薪酬水平，并据此构造超额薪酬 Overpay。标准误为公司层面聚类稳健标准误。")
+    add_table_note(doc, "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。模型1使用 OLS 并控制行业与年份虚拟变量，其残差直接记为超额薪酬 Overpay。Zone 为虚拟变量，其中中西部=1、东部=0。")
 
 
 def _add_regression_table(doc, title, col_headers, sub_headers, display_vars, models_data, note, extra_rows=None):
@@ -355,48 +370,42 @@ def _add_regression_table(doc, title, col_headers, sub_headers, display_vars, mo
     add_table_note(doc, note)
 
 
-def build_main_table_docx(doc, df):
-    """表3 主回归（统一样本）"""
-    control_vars = ["Roa", "Lever", "Top1", "Zone"]
-    all_needed = ["lnSubsidy_l1", "Power"] + control_vars + ["Overpay", "IndustrySector", "Year"]
-    df_unified = df.dropna(subset=all_needed).copy()
-
-    m3, n3 = fit_model(df, "Overpay", ["lnSubsidy_l1"] + control_vars, df_pre=df_unified)
-    m4, n4 = fit_model(df, "Overpay", ["lnSubsidy_l1", "Power"] + control_vars, df_pre=df_unified)
-    m5, n5 = fit_model(df, "Power", ["lnSubsidy_l1"] + control_vars, df_pre=df_unified)
-
-    display_vars = ["lnSubsidy_l1", "Power", "Roa", "Lever", "Top1", "Zone"]
-    fe = ["控制"] * 3
+def build_main_table_docx(doc, main_results):
+    """表3 主回归（模型2）"""
+    model2 = main_results["model2"]
+    main_fit = main_results["main_result"]
+    display_vars = ["lnSubsidy_l1", "Roa", "Lever", "Top1", "Zone"]
 
     _add_regression_table(
         doc,
-        "表3  政府补助、管理层权力与高管超额薪酬的回归结果（修订后主测度：Power 为 FA）",
-        ["模型(3)", "模型(4)", "模型(5)"],
-        ["Overpay", "Overpay", "Power(FA)"],
+        "表3  主回归结果（模型2，公司与年份固定效应）",
+        ["模型2"],
+        ["Overpay"],
         display_vars,
-        [(m3, n3), (m4, n4), (m5, n5)],
-        "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。Power 为因子分析（FA）构造的管理层权力指标。标准误为公司层面聚类稳健标准误。",
+        [(model2, main_fit["sample_size"])],
+        "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。F 统计量报告公司层面聚类稳健标准误下的联合显著性检验。标准误为公司层面聚类稳健标准误。",
         extra_rows=[
-            ("Firm FE", fe),
-            ("Year FE", fe),
+            ("Firm FE", ["控制"]),
+            ("Year FE", ["控制"]),
+            ("F统计量", [f"{_get_fstat(model2):.2f}"]),
         ],
     )
 
 
 def build_mediation_table_docx(doc, df):
-    """表4 全样本中介效应检验。"""
+    """表5 全样本中介效应检验。"""
     results = df if isinstance(df, dict) else run_regressions(df)
     summary = results["summary"]
     model3 = results["model3"]
     model4 = results["model4"]
     model5 = results["model5"]
-    add_table_title(doc, "表4  管理层权力的中介效应检验结果（FA口径，公司与年份固定效应）")
+    add_table_title(doc, "表5  管理层权力的中介效应检验结果（模型3至模型5，FA口径）")
 
     rows = [
-        ("总效应 c：lnSubsidy_l1 → Overpay", format_coef(summary["coef_c"], summary["p_c"]), f"{_get_std_error(model3, 'lnSubsidy_l1'):.4f}", "—"),
-        ("路径 a：lnSubsidy_l1 → Power（FA）", format_coef(summary["coef_a"], summary["p_a"]), f"{_get_std_error(model5, 'lnSubsidy_l1'):.4f}", "—"),
-        ("路径 b：Power（FA） → Overpay", format_coef(summary["coef_b"], summary["p_b"]), f"{_get_std_error(model4, 'Power'):.4f}", "—"),
-        ("直接效应 c'：lnSubsidy_l1 → Overpay", format_coef(summary["coef_c_prime"], summary["p_c_prime"]), f"{_get_std_error(model4, 'lnSubsidy_l1'):.4f}", "—"),
+        ("模型3 总效应 c：lnSubsidy_l1 → Overpay", format_coef(summary["coef_c"], summary["p_c"]), f"{_get_std_error(model3, 'lnSubsidy_l1'):.4f}", "—"),
+        ("模型4 路径 a：lnSubsidy_l1 → Power（FA）", format_coef(summary["coef_a"], summary["p_a"]), f"{_get_std_error(model4, 'lnSubsidy_l1'):.4f}", "—"),
+        ("模型5 路径 b：Power（FA） → Overpay", format_coef(summary["coef_b"], summary["p_b"]), f"{_get_std_error(model5, 'Power'):.4f}", "—"),
+        ("模型5 直接效应 c'：lnSubsidy_l1 → Overpay", format_coef(summary["coef_c_prime"], summary["p_c_prime"]), f"{_get_std_error(model5, 'lnSubsidy_l1'):.4f}", "—"),
         ("间接效应 a×b", f"{summary['indirect_effect']:.6f}", "—", f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}]"),
         ("Sobel p 值", f"{summary['sobel_p']:.4f}", "—", "—"),
         ("中介效应占比（a×b / c）", f"{summary['mediation_ratio_pct']:.2f}%", "—", "—"),
@@ -416,16 +425,16 @@ def build_mediation_table_docx(doc, df):
     apply_three_line_style(table, header_rows=1)
     add_table_note(
         doc,
-        "注：***、**、* 分别表示在1%、5%、10%水平上显著。Bootstrap 为公司层面 cluster bootstrap，300 次重抽样。所有回归均控制 Roa、Lever、Top1、Zone 以及公司和年份固定效应。"
+        "注：***、**、* 分别表示在1%、5%、10%水平上显著。模型3报告总效应，模型4报告路径a，模型5同时报告路径b与直接效应。Bootstrap 为公司层面 cluster bootstrap，300 次重抽样。所有回归均控制 Roa、Lever、Top1、Zone 以及公司和年份固定效应。"
     )
 
 
 def build_causal_table_docx(doc, main_results):
-    """表5 FE-2SLS 因果识别结果。"""
+    """表4 FE-2SLS 因果识别结果。"""
     iv_result = main_results["iv_result"]
     first_stage = iv_result["first_stage"]
     second_stage = iv_result["model"]
-    add_table_title(doc, "表5  工具变量（FE-2SLS）估计结果")
+    add_table_title(doc, "表4  工具变量（FE-2SLS）估计结果")
 
     rows = [
         ("第一阶段", "lnSubsidy_l1", format_coef(first_stage["coef"], first_stage["f_pval"]), f"Partial F = {first_stage['f_stat']:.2f}", str(iv_result["sample_size"])),
@@ -448,22 +457,19 @@ def build_causal_table_docx(doc, main_results):
 
 
 def build_subsample_table_docx(doc, df, title, group_specs):
-    """分组回归表（统一样本）"""
+    """分组主回归表（模型2）"""
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
-    display_vars = ["lnSubsidy_l1", "Power", "Roa", "Lever", "Top1", "Zone"]
+    display_vars = ["lnSubsidy_l1", "Roa", "Lever", "Top1", "Zone"]
 
     models_data = []
     col_headers = []
     sub_headers = []
     for label, mask in group_specs:
         df_sub = df[mask].copy()
-        all_needed = ["lnSubsidy_l1", "Power"] + control_vars + ["Overpay", "IndustrySector", "Year"]
-        df_sub_unified = df_sub.dropna(subset=all_needed).copy()
-        m3, n3 = fit_model(df_sub, "Overpay", ["lnSubsidy_l1"] + control_vars, df_pre=df_sub_unified)
-        m4, n4 = fit_model(df_sub, "Overpay", ["lnSubsidy_l1", "Power"] + control_vars, df_pre=df_sub_unified)
-        models_data.extend([(m3, n3), (m4, n4)])
-        col_headers.extend([f"{label}-模型(3)", f"{label}-模型(4)"])
-        sub_headers.extend(["Overpay", "Overpay"])
+        model, nobs = fit_model(df_sub, "Overpay", ["lnSubsidy_l1"] + control_vars)
+        models_data.append((model, nobs))
+        col_headers.append(label)
+        sub_headers.append("模型2")
 
     fe = ["控制"] * len(models_data)
 
@@ -474,49 +480,8 @@ def build_subsample_table_docx(doc, df, title, group_specs):
     )
 
 
-def build_grouped_mediation_table_docx(doc, df):
-    """附表A 分组中介效应汇总。"""
-    summary_df = df if hasattr(df, "columns") else grouped_mediation_analysis(df)
-    add_table_title(doc, "附表A  分组中介效应汇总（FA 修订后主测度，含分层FDR与bootstrap复核）")
-
-    cols = [
-        ("层级", "layer"),
-        ("分组", "group"),
-        ("N", "sample_size"),
-        ("聚类数", "n_clusters"),
-        ("路径a", "coef_a"),
-        ("路径b", "coef_b"),
-        ("原始Sobel_p", "sobel_p"),
-        ("FDR_p", "fdr_p"),
-        ("路径b显著", "path_b_significant"),
-        ("中介类型", "mediation_type"),
-        ("严谨口径", "group_evidence_level"),
-    ]
-    table = doc.add_table(rows=1 + len(summary_df), cols=len(cols))
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    for i, (label, _) in enumerate(cols):
-        set_cell_text(table.cell(0, i), label, bold=True, font_size=9.5)
-
-    for row_idx, (_, row) in enumerate(summary_df.iterrows(), start=1):
-        for col_idx, (label, key) in enumerate(cols):
-            value = row[key]
-            if key in {"coef_a", "coef_b"}:
-                text = f"{value:.4f}"
-            elif key in {"sobel_p", "fdr_p"}:
-                text = format_pval(value)
-            elif key == "path_b_significant":
-                text = "是" if bool(value) else "否"
-            else:
-                text = str(value)
-            align = WD_ALIGN_PARAGRAPH.LEFT if key in {"layer", "group", "mediation_type", "group_evidence_level"} else WD_ALIGN_PARAGRAPH.CENTER
-            set_cell_text(table.cell(row_idx, col_idx), text, alignment=align, font_size=9.5)
-
-    apply_three_line_style(table, header_rows=1)
-    add_table_note(doc, "注：FDR 为在“产权直分”“补充分组”两个层级内分别进行的 BH 校正；bootstrap 仅对原始 Sobel p<0.10 的分组执行。严谨口径在中介类型基础上进一步要求通过相应层内 FDR，未通过者仅可谨慎解释。")
-
-
 def build_robustness_table_docx(doc, df):
-    """表9 稳健性检验"""
+    """表6 稳健性检验"""
     control_vars = ["Roa", "Lever", "Top1", "Zone"]
     core_vars = ["lnSubsidy_l1"] + control_vars
 
@@ -532,27 +497,20 @@ def build_robustness_table_docx(doc, df):
     checks.append(("(2) 缩小样本期", "Overpay", m2, n2, "lnSubsidy_l1"))
 
     # (3)
-    q05 = df["lnSubsidy_l1"].quantile(0.05)
-    q95 = df["lnSubsidy_l1"].quantile(0.95)
-    df_r3 = df[(df["lnSubsidy_l1"] >= q05) & (df["lnSubsidy_l1"] <= q95)].copy()
-    m3, n3 = fit_model(df_r3, "Overpay", core_vars)
-    checks.append(("(3) 剔除极端补助", "Overpay", m3, n3, "lnSubsidy_l1"))
-
-    # (4)
     df_r4 = df[df["Industry"] == 1].copy()
     m4, n4 = fit_model(df_r4, "Overpay", core_vars)
-    checks.append(("(4) 仅制造业", "Overpay", m4, n4, "lnSubsidy_l1"))
+    checks.append(("(3) 仅制造业", "Overpay", m4, n4, "lnSubsidy_l1"))
 
-    # (5)
+    # (4)
     df_alt = df.sort_values(["Symbol", "Year"]).copy()
     if "lnSubsidy1p_l1" not in df_alt.columns:
         df_alt["lnSubsidy1p_l1"] = df_alt.groupby("Symbol")["lnSubsidy1p"].shift(1)
     core_alt = ["lnSubsidy1p_l1"] + control_vars
     m5, n5 = fit_model(df_alt, "Overpay", core_alt)
-    checks.append(("(5) 替换解释变量", "Overpay", m5, n5, "lnSubsidy1p_l1"))
+    checks.append(("(4) 替换解释变量", "Overpay", m5, n5, "lnSubsidy1p_l1"))
 
     # 构建表格
-    add_table_title(doc, "表9  稳健性检验结果")
+    add_table_title(doc, "表6  稳健性检验结果")
     n_checks = len(checks)
     # 行：表头2 + 系数1 + t值1 + Controls + Industry FE + Year FE + N + R² = 9
     table = doc.add_table(rows=9, cols=1 + n_checks)
@@ -605,7 +563,6 @@ def main():
     print("加载数据...")
     df, _ = build_analysis_dataset(data_dir)
     main_results = run_regressions(df)
-    grouped_results = grouped_mediation_analysis(df)
 
     print("\n生成 Word 文档...")
     doc = Document()
@@ -645,43 +602,40 @@ def main():
     build_first_stage_table_docx(doc, df)
 
     print("  生成表3 主回归...")
-    build_main_table_docx(doc, df)
+    build_main_table_docx(doc, main_results)
 
-    print("  生成表4 中介效应...")
-    build_mediation_table_docx(doc, main_results)
-
-    print("  生成表5 FE-2SLS...")
+    print("  生成表4 FE-2SLS...")
     build_causal_table_docx(doc, main_results)
+
+    print("  生成表5 中介效应...")
+    build_mediation_table_docx(doc, main_results)
 
     soe_df = df[df["IsSOE"] == 1].copy()
     identified_ratio = soe_df["IsCentralSOE"].notna().mean() if len(soe_df) > 0 else np.nan
 
-    print("  生成表6 分产权性质...")
+    print("  生成表6 稳健性检验...")
+    build_robustness_table_docx(doc, df)
+
+    print("  生成表7 分产权性质...")
     build_subsample_table_docx(
         doc, df,
-        "表6  分产权性质回归结果",
+        "表7  分产权性质主回归结果（模型2）",
         [("国有", df["IsSOE"] == 1), ("私营", df["IsPrivate"] == 1)],
     )
 
-    print("  生成表7 分行业管制...")
+    print("  生成表8 分行业管制...")
     build_subsample_table_docx(
         doc, df,
-        "表7  分行业管制回归结果",
+        "表8  分行业管制主回归结果（模型2）",
         [("管制行业", df["RegulatedIndustry"] == 1), ("非管制行业", df["RegulatedIndustry"] == 0)],
     )
 
-    print("  生成表8 央企vs地方国企...")
+    print("  生成表9 央企vs地方国企...")
     build_subsample_table_docx(
         doc, df,
-        f"表8  央企与地方国企回归结果（央地可识别比例={identified_ratio:.2%}）",
+        f"表9  央企与地方国企主回归结果（模型2，央地可识别比例={identified_ratio:.2%}）",
         [("央企", df["IsCentralSOE"] == 1), ("地方国企", df["IsCentralSOE"] == 0)],
     )
-
-    print("  生成表9 稳健性检验...")
-    build_robustness_table_docx(doc, df)
-
-    print("  生成附表A 分组中介效应汇总...")
-    build_grouped_mediation_table_docx(doc, grouped_results)
 
     # 保存
     output_dir = os.path.join(os.getcwd(), "results")
