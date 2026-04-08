@@ -2,6 +2,9 @@ import os
 import pandas as pd
 import glob
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def validate_data(input_dir, output_dir):
     print("Starting validation...\n")
     
@@ -78,8 +81,7 @@ def validate_data(input_dir, output_dir):
         print("-" * 30)
 
 if __name__ == "__main__":
-    current_dir = os.getcwd()
-    data_dir = os.path.join(current_dir, "data")
-    processed_dir = os.path.join(current_dir, "processed_data")
+    data_dir = os.path.join(ROOT_DIR, "data")
+    processed_dir = os.path.join(ROOT_DIR, "processed_data")
     
     validate_data(data_dir, processed_dir)

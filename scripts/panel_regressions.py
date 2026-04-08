@@ -6,13 +6,14 @@
 4. FA口径管理层权力中介效应（公司FE）
 """
 
-import csv, math, random, sys
+import csv, math, os, random, sys
 from collections import defaultdict
 
 random.seed(42)
 
 # ── 读取数据 ──────────────────────────────────────────────────────────────────
-DATA = '/Users/lewis/bishe/results/regression_dataset.csv'
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.path.join(ROOT_DIR, "results", "regression_dataset.csv")
 
 def to_float(s):
     try:
@@ -55,11 +56,10 @@ def make_sample(rows, require_lag=False):
         roa     = to_float(r.get('Roa'))
         lever   = to_float(r.get('Lever'))
         top1    = to_float(r.get('Top1'))
-        zone    = to_float(r.get('Zone'))
         ind     = r.get('IndustrySector', '')
         city    = r.get('City', '')
 
-        if any(v is None for v in [overpay, lnsub, power, roa, lever, top1, zone]):
+        if any(v is None for v in [overpay, lnsub, power, roa, lever, top1]):
             continue
         if not ind or not city:
             continue
@@ -76,7 +76,7 @@ def make_sample(rows, require_lag=False):
             'sym': sym, 'yr': yr,
             'overpay': overpay, 'lnsub': lnsub,
             'power': power, 'roa': roa,
-            'lever': lever, 'top1': top1, 'zone': zone,
+            'lever': lever, 'top1': top1,
             'ind': ind, 'city': city,
             'lnsub_lag': lnsub_lag,
         })
@@ -173,7 +173,7 @@ def year_dummies(yr_arr):
 # ── 回归1：行业+年份FE（基准，当期补贴）─────────────────────────────────────
 # 已有主回归结果，这里计算公司FE的结果
 
-def run_twoway_fe(sample, y_var='overpay', x_var='lnsub', controls=['roa','lever','top1','zone'],
+def run_twoway_fe(sample, y_var='overpay', x_var='lnsub', controls=['roa','lever','top1'],
                   extra_x=None, return_resid=False):
     """
     公司+年份双向FE回归。
@@ -232,7 +232,7 @@ yr_iv   = [obs['yr']  for obs in obs_iv]
 
 y_iv    = np.array([obs['overpay'] for obs in obs_iv])
 lnsub_iv = np.array([obs['lnsub'] for obs in obs_iv])
-ctrl_iv  = np.column_stack([[obs[c] for obs in obs_iv] for c in ['roa','lever','top1','zone']])
+ctrl_iv  = np.column_stack([[obs[c] for obs in obs_iv] for c in ['roa','lever','top1']])
 yrdum_iv, _ = year_dummies(yr_iv)
 
 # 第一阶段：lnSubsidy ~ IV + controls（公司FE）

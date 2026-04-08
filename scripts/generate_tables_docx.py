@@ -9,6 +9,9 @@ import numpy as np
 
 warnings.filterwarnings("ignore")
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
+
 from docx import Document
 from docx.shared import Pt, Cm, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -28,8 +31,12 @@ def _set_run_font(run, font_name="Times New Roman", east_asia="宋体"):
         rPr.insert(0, rFonts)
     rFonts.set(qn('w:eastAsia'), east_asia)
 
-sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
 from regression_analysis import (
+    ALT_SUBSIDY_LAG_COL,
+    BASE_SUBSIDY_LAG_COL,
+    FE_CONTROL_VARS,
     build_analysis_dataset,
     run_regressions,
     _fit_expectation_salary_model,
@@ -209,8 +216,8 @@ def build_desc_table_docx(doc, df):
     desc_vars_map = {
         "Top3Salary": "高管前三名薪酬总额",
         "SubsidyAmount": "政府补助",
-        "lnSubsidy": "财政补贴强度(lnSubsidy)",
-        "lnCEOpay": "薪酬对数(lnCEOpay)",
+        "lnSubsidy": "财政补贴强度(lnSubsidy=ln(1+Subsidy))",
+        "lnCEOpay": "高管前三名薪酬对数",
         "lnSale": "企业规模(lnSale)",
         "IA": "无形资产占比(IA)",
         "Overpay": "超额薪酬(Overpay)",
@@ -374,7 +381,7 @@ def build_main_table_docx(doc, main_results):
     """表3 主回归（模型2）"""
     model2 = main_results["model2"]
     main_fit = main_results["main_result"]
-    display_vars = ["lnSubsidy_l1", "Roa", "Lever", "Top1", "Zone"]
+    display_vars = [BASE_SUBSIDY_LAG_COL, "Roa", "Lever", "Top1"]
 
     _add_regression_table(
         doc,
@@ -383,7 +390,7 @@ def build_main_table_docx(doc, main_results):
         ["Overpay"],
         display_vars,
         [(model2, main_fit["sample_size"])],
-        "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。F 统计量报告公司层面聚类稳健标准误下的联合显著性检验。标准误为公司层面聚类稳健标准误。",
+        "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。F 统计量报告公司层面聚类稳健标准误下的联合显著性检验。标准误为公司层面聚类稳健标准误。控制变量包括 Roa、Lever 和 Top1。",
         extra_rows=[
             ("Firm FE", ["控制"]),
             ("Year FE", ["控制"]),
@@ -402,10 +409,10 @@ def build_mediation_table_docx(doc, df):
     add_table_title(doc, "表5  管理层权力的中介效应检验结果（模型3至模型5，FA口径）")
 
     rows = [
-        ("模型3 总效应 c：lnSubsidy_l1 → Overpay", format_coef(summary["coef_c"], summary["p_c"]), f"{_get_std_error(model3, 'lnSubsidy_l1'):.4f}", "—"),
-        ("模型4 路径 a：lnSubsidy_l1 → Power（FA）", format_coef(summary["coef_a"], summary["p_a"]), f"{_get_std_error(model4, 'lnSubsidy_l1'):.4f}", "—"),
+        (f"模型3 总效应 c：{BASE_SUBSIDY_LAG_COL} → Overpay", format_coef(summary["coef_c"], summary["p_c"]), f"{_get_std_error(model3, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
+        (f"模型4 路径 a：{BASE_SUBSIDY_LAG_COL} → Power（FA）", format_coef(summary["coef_a"], summary["p_a"]), f"{_get_std_error(model4, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
         ("模型5 路径 b：Power（FA） → Overpay", format_coef(summary["coef_b"], summary["p_b"]), f"{_get_std_error(model5, 'Power'):.4f}", "—"),
-        ("模型5 直接效应 c'：lnSubsidy_l1 → Overpay", format_coef(summary["coef_c_prime"], summary["p_c_prime"]), f"{_get_std_error(model5, 'lnSubsidy_l1'):.4f}", "—"),
+        (f"模型5 直接效应 c'：{BASE_SUBSIDY_LAG_COL} → Overpay", format_coef(summary["coef_c_prime"], summary["p_c_prime"]), f"{_get_std_error(model5, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
         ("间接效应 a×b", f"{summary['indirect_effect']:.6f}", "—", f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}]"),
         ("Sobel p 值", f"{summary['sobel_p']:.4f}", "—", "—"),
         ("中介效应占比（a×b / c）", f"{summary['mediation_ratio_pct']:.2f}%", "—", "—"),
@@ -425,7 +432,7 @@ def build_mediation_table_docx(doc, df):
     apply_three_line_style(table, header_rows=1)
     add_table_note(
         doc,
-        "注：***、**、* 分别表示在1%、5%、10%水平上显著。模型3报告总效应，模型4报告路径a，模型5同时报告路径b与直接效应。Bootstrap 为公司层面 cluster bootstrap，300 次重抽样。所有回归均控制 Roa、Lever、Top1、Zone 以及公司和年份固定效应。"
+        "注：***、**、* 分别表示在1%、5%、10%水平上显著。模型3报告总效应，模型4报告路径a，模型5同时报告路径b与直接效应。Bootstrap 为公司层面 cluster bootstrap，300 次重抽样。所有回归均控制 Roa、Lever、Top1 以及公司和年份固定效应。"
     )
 
 
@@ -437,8 +444,8 @@ def build_causal_table_docx(doc, main_results):
     add_table_title(doc, "表4  工具变量（FE-2SLS）估计结果")
 
     rows = [
-        ("第一阶段", "lnSubsidy_l1", format_coef(first_stage["coef"], first_stage["f_pval"]), f"Partial F = {first_stage['f_stat']:.2f}", str(iv_result["sample_size"])),
-        ("第二阶段", "Overpay", format_coef(second_stage.params["lnSubsidy_l1"], second_stage.pvalues["lnSubsidy_l1"]), f"t = {_get_tstat(second_stage, 'lnSubsidy_l1'):.4f}", str(iv_result["sample_size"])),
+        ("第一阶段", BASE_SUBSIDY_LAG_COL, format_coef(first_stage["coef"], first_stage["f_pval"]), f"Partial F = {first_stage['f_stat']:.2f}", str(iv_result["sample_size"])),
+        ("第二阶段", "Overpay", format_coef(second_stage.params[BASE_SUBSIDY_LAG_COL], second_stage.pvalues[BASE_SUBSIDY_LAG_COL]), f"t = {_get_tstat(second_stage, BASE_SUBSIDY_LAG_COL):.4f}", str(iv_result["sample_size"])),
     ]
 
     table = doc.add_table(rows=1 + len(rows), cols=5)
@@ -458,15 +465,15 @@ def build_causal_table_docx(doc, main_results):
 
 def build_subsample_table_docx(doc, df, title, group_specs):
     """分组主回归表（模型2）"""
-    control_vars = ["Roa", "Lever", "Top1", "Zone"]
-    display_vars = ["lnSubsidy_l1", "Roa", "Lever", "Top1", "Zone"]
+    control_vars = FE_CONTROL_VARS.copy()
+    display_vars = [BASE_SUBSIDY_LAG_COL, "Roa", "Lever", "Top1"]
 
     models_data = []
     col_headers = []
     sub_headers = []
     for label, mask in group_specs:
         df_sub = df[mask].copy()
-        model, nobs = fit_model(df_sub, "Overpay", ["lnSubsidy_l1"] + control_vars)
+        model, nobs = fit_model(df_sub, "Overpay", [BASE_SUBSIDY_LAG_COL] + control_vars)
         models_data.append((model, nobs))
         col_headers.append(label)
         sub_headers.append("模型2")
@@ -482,32 +489,30 @@ def build_subsample_table_docx(doc, df, title, group_specs):
 
 def build_robustness_table_docx(doc, df):
     """表6 稳健性检验"""
-    control_vars = ["Roa", "Lever", "Top1", "Zone"]
-    core_vars = ["lnSubsidy_l1"] + control_vars
+    control_vars = FE_CONTROL_VARS.copy()
+    core_vars = [BASE_SUBSIDY_LAG_COL] + control_vars
 
     checks = []
 
     # (1)
     m1, n1 = fit_model(df, "lnCEOpay", core_vars)
-    checks.append(("(1) 替换因变量", "lnCEOpay", m1, n1, "lnSubsidy_l1"))
+    checks.append(("(1) 替换因变量", "高管前三名薪酬对数", m1, n1, BASE_SUBSIDY_LAG_COL))
 
     # (2)
     df_r2 = df[(df["Year"] >= 2010) & (df["Year"] <= 2020)].copy()
     m2, n2 = fit_model(df_r2, "Overpay", core_vars)
-    checks.append(("(2) 缩小样本期", "Overpay", m2, n2, "lnSubsidy_l1"))
+    checks.append(("(2) 缩小样本期", "Overpay", m2, n2, BASE_SUBSIDY_LAG_COL))
 
     # (3)
     df_r4 = df[df["Industry"] == 1].copy()
     m4, n4 = fit_model(df_r4, "Overpay", core_vars)
-    checks.append(("(3) 仅制造业", "Overpay", m4, n4, "lnSubsidy_l1"))
+    checks.append(("(3) 仅制造业", "Overpay", m4, n4, BASE_SUBSIDY_LAG_COL))
 
     # (4)
     df_alt = df.sort_values(["Symbol", "Year"]).copy()
-    if "lnSubsidy1p_l1" not in df_alt.columns:
-        df_alt["lnSubsidy1p_l1"] = df_alt.groupby("Symbol")["lnSubsidy1p"].shift(1)
-    core_alt = ["lnSubsidy1p_l1"] + control_vars
+    core_alt = [ALT_SUBSIDY_LAG_COL] + control_vars
     m5, n5 = fit_model(df_alt, "Overpay", core_alt)
-    checks.append(("(4) 替换解释变量", "Overpay", m5, n5, "lnSubsidy1p_l1"))
+    checks.append(("(4) 替换解释变量", "Overpay", m5, n5, ALT_SUBSIDY_LAG_COL))
 
     # 构建表格
     add_table_title(doc, "表6  稳健性检验结果")
@@ -551,7 +556,7 @@ def build_robustness_table_docx(doc, df):
                 set_cell_text(table.cell(4 + r, i + 1), "控制")
 
     apply_three_line_style(table, header_rows=2)
-    add_table_note(doc, "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。标准误为公司层面聚类稳健标准误。")
+    add_table_note(doc, "注：括号中为 t 值，* p<0.1, ** p<0.05, *** p<0.01。标准误为公司层面聚类稳健标准误。所有固定效应回归均控制 Roa、Lever、Top1，并加入公司和年份固定效应。")
 
 
 # ============================================================
@@ -559,7 +564,7 @@ def build_robustness_table_docx(doc, df):
 # ============================================================
 
 def main():
-    data_dir = os.path.join(os.getcwd(), "processed_data")
+    data_dir = os.path.join(ROOT_DIR, "processed_data")
     print("加载数据...")
     df, _ = build_analysis_dataset(data_dir)
     main_results = run_regressions(df)
@@ -638,7 +643,7 @@ def main():
     )
 
     # 保存
-    output_dir = os.path.join(os.getcwd(), "results")
+    output_dir = os.path.join(ROOT_DIR, "results")
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, "回归结果表.docx")
     doc.save(output_file)

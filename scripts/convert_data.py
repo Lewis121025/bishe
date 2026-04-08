@@ -2,6 +2,9 @@ import os
 import pandas as pd
 import glob
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def process_data(input_dir, output_dir):
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
@@ -69,9 +72,8 @@ def process_data(input_dir, output_dir):
                 print(f"Error processing {filename}: {e}")
 
 if __name__ == "__main__":
-    current_dir = os.getcwd()
-    data_dir = os.path.join(current_dir, "data")
-    processed_dir = os.path.join(current_dir, "processed_data")
+    data_dir = os.path.join(ROOT_DIR, "data")
+    processed_dir = os.path.join(ROOT_DIR, "processed_data")
     
     print("Starting conversion...")
     try:

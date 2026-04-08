@@ -17,7 +17,11 @@ import warnings
 import numpy as np
 import pandas as pd
 
-os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.getcwd(), "results", ".matplotlib"))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
+RESULTS_DIR = os.path.join(ROOT_DIR, "results")
+
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(RESULTS_DIR, ".matplotlib"))
 
 import matplotlib
 
@@ -42,6 +46,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import (
     GridSearchCV,
+    GroupShuffleSplit,
     KFold,
     RandomizedSearchCV,
     StratifiedKFold,
@@ -59,7 +64,8 @@ plt.rcParams["font.sans-serif"] = ["Arial Unicode MS", "SimHei", "Heiti TC", "Pi
 plt.rcParams["axes.unicode_minus"] = False
 plt.rcParams["figure.dpi"] = 150
 
-sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
 from regression_analysis import build_analysis_dataset
 
 RANDOM_STATE = 42
@@ -102,6 +108,19 @@ def _classification_metrics(model, X_test, y_test):
     }
 
 
+def _classification_cv_roc_auc(model, X_train, y_train, groups_train, cv):
+    scores = cross_val_score(
+        model,
+        X_train,
+        y_train,
+        groups=groups_train,
+        cv=cv,
+        scoring="roc_auc",
+        n_jobs=1,
+    )
+    return float(scores.mean()), float(scores.std())
+
+
 def prepare_ml_data(df):
     """准备机器学习所需的数据。"""
     print("\n" + "=" * 70)
@@ -139,7 +158,7 @@ def prepare_ml_data(df):
     print(f"  超额薪酬为正样本: {positive_count}")
     print(f"  超额薪酬为负样本: {negative_count}")
     print(f"  正类比例: {positive_ratio:.4%}")
-    print("  判断：类别分布基本均衡，不采用 SMOTE；holdout 采用时间切分以避免未来信息泄露，并在分类模型中比较 class_weight/scale_pos_weight。")
+    print("  判断：类别分布基本均衡，不采用 SMOTE；holdout 采用 GroupShuffleSplit 按公司分组随机划分，并在分类模型中比较 class_weight/scale_pos_weight。")
 
     return {
         "df_ml": df_ml,
@@ -156,15 +175,15 @@ def prepare_ml_data(df):
 
 
 def create_holdout_splits(X, y, y_class, df_ml):
-    """基于时间的切割（Time-based Split），前 80% 的年份作为训练集，后 20% 作为测试集，避免未来数据泄露评估。"""
-    unique_years = sorted(df_ml['Year'].unique())
-    split_idx = int(len(unique_years) * (1 - TEST_SIZE))
-    train_years = unique_years[:split_idx]
-    test_years = unique_years[split_idx:]
-    
-    train_idx = np.where(df_ml['Year'].isin(train_years))[0]
-    test_idx = np.where(~df_ml['Year'].isin(train_years))[0]
+    """以公司为分组单位的随机划分（GroupShuffleSplit），确保同一公司全部年度观测仅进入训练集或测试集之一，避免公司内序列相关导致性能高估。"""
     groups = df_ml['Symbol']
+    gss = GroupShuffleSplit(n_splits=1, test_size=TEST_SIZE, random_state=RANDOM_STATE)
+    train_idx, test_idx = next(gss.split(X, y, groups=groups))
+
+    n_train_companies = groups.iloc[train_idx].nunique()
+    n_test_companies = groups.iloc[test_idx].nunique()
+    print(f"  GroupShuffleSplit: 训练集 {len(train_idx)} 条（{n_train_companies} 家公司），"
+          f"测试集 {len(test_idx)} 条（{n_test_companies} 家公司）")
 
     return {
         "train_idx": train_idx,
@@ -177,8 +196,6 @@ def create_holdout_splits(X, y, y_class, df_ml):
         "yc_test": y_class.iloc[test_idx].copy(),
         "groups_train": groups.iloc[train_idx].copy(),
         "groups_test": groups.iloc[test_idx].copy(),
-        "train_years": [int(year) for year in train_years],
-        "test_years": [int(year) for year in test_years],
     }
 
 
@@ -341,6 +358,7 @@ def random_forest_analysis(X_train, X_test, y_train, y_test, yc_train, yc_test, 
     rf_clf_search.fit(X_train, yc_train, groups=groups_train)
     rf_clf = rf_clf_search.best_estimator_
     rf_clf_metrics = _classification_metrics(rf_clf, X_test, yc_test)
+    rf_clf_cv_mean, rf_clf_cv_std = _classification_cv_roc_auc(rf_clf, X_train, yc_train, groups_train, cv_clf)
 
     importance_reg = pd.DataFrame({
         "变量": feature_names,
@@ -357,6 +375,7 @@ def random_forest_analysis(X_train, X_test, y_train, y_test, yc_train, yc_test, 
     print(f"  随机森林回归 5-fold CV R² = {rf_reg_cv.mean():.4f} ± {rf_reg_cv.std():.4f}")
     print(f"  随机森林分类 Accuracy = {rf_clf_metrics['Accuracy']:.4f}")
     print(f"  随机森林分类 F1 = {rf_clf_metrics['F1']:.4f}")
+    print(f"  随机森林分类 5-fold CV ROC_AUC = {rf_clf_cv_mean:.4f} ± {rf_clf_cv_std:.4f}")
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     reg_sorted = importance_reg.sort_values("回归重要性", ascending=True)
@@ -381,6 +400,8 @@ def random_forest_analysis(X_train, X_test, y_train, y_test, yc_train, yc_test, 
         "rf_reg_tuning": "RandomizedSearchCV(n_iter=8, cv=5)",
         "rf_clf": rf_clf,
         "rf_clf_metrics": rf_clf_metrics,
+        "rf_clf_cv_mean": rf_clf_cv_mean,
+        "rf_clf_cv_std": rf_clf_cv_std,
         "rf_clf_params": rf_clf_search.best_params_,
         "rf_clf_tuning": "RandomizedSearchCV(n_iter=8, cv=5, scoring=F1)",
         "importance_reg": importance_reg,
@@ -454,6 +475,32 @@ def xgboost_regression_analysis(X_train, X_test, y_train, y_test, groups_train, 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "fig4_shap_subsidy.png"), bbox_inches="tight")
     plt.close()
+
+    # SHAP交互图：lnSubsidy × IsSOE（补贴×产权性质）
+    if "IsSOE" in feature_names:
+        issoe_idx = feature_names.index("IsSOE")
+        fig, ax = plt.subplots(figsize=(8, 5))
+        shap.dependence_plot(subsidy_idx, shap_values, X_sample, interaction_index=issoe_idx,
+                             feature_names=feature_names, ax=ax, show=False)
+        ax.set_title("图4a  lnSubsidy × IsSOE 交互效应（SHAP依赖图）", fontsize=13)
+        ax.set_xlabel("lnSubsidy (政府补助对数)")
+        ax.set_ylabel("SHAP值 (对超额薪酬的边际影响)")
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "fig4a_shap_subsidy_issoe.png"), bbox_inches="tight")
+        plt.close()
+
+    # SHAP交互图：lnSubsidy × Mgshder（补贴×管理层持股）
+    if "Mgshder" in feature_names:
+        mgshder_idx = feature_names.index("Mgshder")
+        fig, ax = plt.subplots(figsize=(8, 5))
+        shap.dependence_plot(subsidy_idx, shap_values, X_sample, interaction_index=mgshder_idx,
+                             feature_names=feature_names, ax=ax, show=False)
+        ax.set_title("图4b  lnSubsidy × Mgshder 交互效应（SHAP依赖图）", fontsize=13)
+        ax.set_xlabel("lnSubsidy (政府补助对数)")
+        ax.set_ylabel("SHAP值 (对超额薪酬的边际影响)")
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "fig4b_shap_subsidy_mgshder.png"), bbox_inches="tight")
+        plt.close()
 
     return {
         "model": xgb_model,
@@ -557,14 +604,20 @@ def classification_comparison(X_train, X_test, yc_train, yc_test, groups_train):
     rows = []
     for spec in models:
         metrics = _classification_metrics(spec["estimator"], X_test, yc_test)
+        cv_mean, cv_std = _classification_cv_roc_auc(spec["estimator"], X_train, yc_train, groups_train, cv)
         rows.append({
             "模型": spec["模型"],
             **metrics,
+            "5折CV ROC_AUC": cv_mean,
             "调参方式": spec["tuning_method"],
             "最优参数摘要": _format_params(spec["params"]),
             "平衡处理": spec["balance"],
         })
-        print(f"  {spec['模型']} -> Accuracy={metrics['Accuracy']:.4f}, F1={metrics['F1']:.4f}, ROC_AUC={metrics['ROC_AUC']:.4f}")
+        print(
+            f"  {spec['模型']} -> Accuracy={metrics['Accuracy']:.4f}, "
+            f"F1={metrics['F1']:.4f}, ROC_AUC={metrics['ROC_AUC']:.4f}, "
+            f"5-fold CV ROC_AUC={cv_mean:.4f} ± {cv_std:.4f}"
+        )
 
     return {
         "comparison": pd.DataFrame(rows),
@@ -760,6 +813,7 @@ def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_r
     rf_row = pd.DataFrame([{
         "模型": "RandomForestClassifier",
         **rf_result["rf_clf_metrics"],
+        "5折CV ROC_AUC": rf_result["rf_clf_cv_mean"],
         "调参方式": rf_result["rf_clf_tuning"],
         "最优参数摘要": _format_params(rf_result["rf_clf_params"]),
         "平衡处理": f"class_weight={rf_result['rf_clf_params'].get('class_weight')}",
@@ -773,13 +827,9 @@ def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_r
             "random_state": RANDOM_STATE,
             "train_size": int(len(splits["train_idx"])),
             "test_size_n": int(len(splits["test_idx"])),
-            "holdout_method": "Time-based Split",
-            "group_isolation": False,
+            "holdout_method": "GroupShuffleSplit (by company Symbol)",
+            "group_isolation": True,
             "classification_stratified": False,
-            "train_year_start": int(splits["train_years"][0]),
-            "train_year_end": int(splits["train_years"][-1]),
-            "test_year_start": int(splits["test_years"][0]),
-            "test_year_end": int(splits["test_years"][-1]),
         },
         "cross_validation": {
             "folds": CV_FOLDS,
@@ -792,8 +842,8 @@ def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_r
             "imbalance_judgment": "不严重失衡",
             "resampling": "未使用SMOTE",
             "handling": (
-                f"holdout采用时间切分：训练集为{splits['train_years'][0]}—{splits['train_years'][-1]}年，"
-                f"测试集为{splits['test_years'][0]}—{splits['test_years'][-1]}年；"
+                "holdout采用GroupShuffleSplit按公司分组随机划分（8:2），"
+                "确保同一公司全部年度仅进入训练或测试集之一；"
                 "分类模型调参比较 class_weight / scale_pos_weight"
             ),
         },
@@ -854,8 +904,8 @@ def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_r
 
 
 def main():
-    data_dir = os.path.join(os.getcwd(), "processed_data")
-    output_dir = os.path.join(os.getcwd(), "results")
+    data_dir = os.path.join(ROOT_DIR, "processed_data")
+    output_dir = os.path.join(ROOT_DIR, "results")
     os.makedirs(output_dir, exist_ok=True)
 
     print("加载数据...")
