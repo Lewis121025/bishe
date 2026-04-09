@@ -6,6 +6,7 @@ import os
 import sys
 import warnings
 import numpy as np
+import pandas as pd
 
 warnings.filterwarnings("ignore")
 
@@ -437,20 +438,41 @@ def build_mediation_table_docx(doc, df):
 
 
 def build_causal_table_docx(doc, main_results):
-    """表4 FE-2SLS 因果识别结果。"""
-    iv_result = main_results["iv_result"]
-    first_stage = iv_result["first_stage"]
-    second_stage = iv_result["model"]
-    add_table_title(doc, "表4  工具变量（FE-2SLS）估计结果")
+    """表4 工具变量与 Heckman 两阶段结果。"""
+    iv_checks = main_results.get("iv_checks", {})
+    iv_df = iv_checks.get("iv_comparison", pd.DataFrame()).copy()
+    heckman = iv_checks.get("heckman_result", {})
+    add_table_title(doc, "表4  工具变量与 Heckman 两阶段结果")
 
-    rows = [
-        ("第一阶段", BASE_SUBSIDY_LAG_COL, format_coef(first_stage["coef"], first_stage["f_pval"]), f"Partial F = {first_stage['f_stat']:.2f}", str(iv_result["sample_size"])),
-        ("第二阶段", "Overpay", format_coef(second_stage.params[BASE_SUBSIDY_LAG_COL], second_stage.pvalues[BASE_SUBSIDY_LAG_COL]), f"t = {_get_tstat(second_stage, BASE_SUBSIDY_LAG_COL):.4f}", str(iv_result["sample_size"])),
-    ]
+    rows = []
+    if not iv_df.empty:
+        for _, row in iv_df.iterrows():
+            stat_text = f"F={row['partial_f']:.2f}"
+            if pd.notna(row.get("overid_p", np.nan)):
+                stat_text += f"; OverID p={row['overid_p']:.3f}"
+            rows.append(
+                (
+                    row["spec_name"],
+                    row["instrument_desc"],
+                    stat_text,
+                    f"{format_coef(row['second_stage_coef'], row['second_stage_p'])}; t={row['second_stage_t']:.4f}",
+                    str(int(row["sample_size"])),
+                )
+            )
+    if heckman:
+        rows.append(
+            (
+                "Heckman两步法",
+                heckman["exclusion_col"],
+                f"IMR p={heckman['imr_p']:.4f}",
+                f"{format_coef(heckman['subsidy_coef'], heckman['subsidy_p'])}; t={heckman['subsidy_t']:.4f}",
+                str(int(heckman["outcome_sample_size"])),
+            )
+        )
 
     table = doc.add_table(rows=1 + len(rows), cols=5)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    headers = ["阶段", "因变量", "系数", "统计量", "N"]
+    headers = ["识别方案", "工具/排除变量", "一阶段统计量", "二阶段补贴系数", "N"]
     for i, header in enumerate(headers):
         set_cell_text(table.cell(0, i), header, bold=True)
 
@@ -460,7 +482,7 @@ def build_causal_table_docx(doc, main_results):
             set_cell_text(table.cell(row_idx, col_idx), value, alignment=align)
 
     apply_three_line_style(table, header_rows=1)
-    add_table_note(doc, f"注：第一阶段报告工具变量系数；Partial R² 为 {first_stage['partial_r2']:.4f}，说明工具变量具有统计相关性但解释力度有限。标准误为公司层面聚类稳健标准误。")
+    add_table_note(doc, "注：前三行为公司固定效应 + 年份固定效应的 FE-2SLS 比较。基准工具变量为滞后一期同城同年其他企业平均补助；简单替代工具变量为滞后一期同行业同年其他企业平均补助；精炼双工具变量为“同行业同年排除本省平均补助”与“同省同行业同年排除本市平均补助”。Heckman 两步法仅用于 `lnSubsidy_pos_l1` 的正补助样本选择校正，第二阶段仍控制 Roa、Lever、Top1 以及公司和年份固定效应。")
 
 
 def build_subsample_table_docx(doc, df, title, group_specs):

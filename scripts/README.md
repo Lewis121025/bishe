@@ -32,6 +32,14 @@
   - 作用：核对 `thesis_final_bundle/thesis_final_humanized_v2.md` 中的核心实证数字是否与 `results/` 目录中的最新结果逐项一致
   - 输出：终端一致性校验结果，失败时列出不一致项
 
+- `export_thesis_markdown_embedded.py`
+  - 作用：将主论文 Markdown 中的本地图片引用替换为 base64 data URI，生成可单文件分发的带图片版本
+  - 输出：`thesis_final_bundle/thesis_final_humanized_v2_embedded.md`
+
+- `update_embedded_markdown.sh`
+  - 作用：一键调用上面的导出脚本，适合每次更新主文件后直接同步带图片版
+  - 输出：`thesis_final_bundle/thesis_final_humanized_v2_embedded.md`
+
 ## 辅助脚本
 
 - `panel_regressions.py`
@@ -48,9 +56,11 @@ python scripts/generate_tables.py
 python scripts/generate_tables_docx.py
 python scripts/ml_analysis.py
 python scripts/verify_thesis_consistency.py
+./scripts/update_embedded_markdown.sh
 ```
 
 ## 使用说明
 
 - 所有脚本都默认以仓库目录为根，不要求必须从某一台特定电脑或绝对路径运行。
 - 若只需查看论文最终结果，通常只需打开 `results/` 目录中的 `.csv`、`.docx` 和 `.png` 文件，无需重新运行脚本。
+- 若只想同步带图片的 Markdown 单文件版本，直接执行 `./scripts/update_embedded_markdown.sh` 即可。

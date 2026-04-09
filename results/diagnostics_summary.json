@@ -1,45 +1,142 @@
 {
   "stage1": {
-    "sample_size": 52828,
-    "r2": 0.5152565662063013,
-    "adj_r2": 0.5148708652643796,
-    "f_stat": 1335.8965721969691,
+    "sample_size": 52805,
+    "r2": 0.5116693373023244,
+    "adj_r2": 0.5112806126930735,
+    "f_stat": 1316.277192453002,
     "f_pvalue": 0.0
   },
   "model2": {
-    "sample_size": 49775,
-    "r2": 0.014982944572320966,
-    "f_stat": 43.937193675383455,
-    "t_stat": 0.5201569313615552
+    "sample_size": 49755,
+    "r2": 0.014887312579939027,
+    "f_stat": 44.012679346893044,
+    "t_stat": 0.5372174377126862
   },
   "iv": {
-    "sample_size": 46670,
-    "first_stage_coef": 0.12015981827762606,
-    "partial_r2": 0.0018760718958480416,
-    "partial_f": 22.636356053859775,
-    "second_stage_coef": -0.0333759355158072,
-    "second_stage_t": -1.5335132041253745
+    "sample_size": 38620,
+    "first_stage_coef": 0.5628514200277037,
+    "partial_r2": 0.013002155109343883,
+    "partial_f": 77.74384222218615,
+    "second_stage_coef": -0.023280708124392896,
+    "second_stage_t": -2.158773363437388
+  },
+  "iv_benchmark": {
+    "spec_name": "基准工具变量",
+    "role": "benchmark",
+    "instrument_desc": "滞后一期同城同年其他企业平均补助",
+    "sample_size": 46634,
+    "n_clusters": 4904,
+    "partial_r2": 0.0018893309447273188,
+    "partial_f": 22.773466056432454,
+    "second_stage_coef": -0.03365742950902073,
+    "second_stage_se": 0.02163050536706622,
+    "second_stage_t": -1.556016789153075,
+    "second_stage_p": 0.11970410009508714,
+    "overid_p": NaN,
+    "overid_wooldridge_p": NaN,
+    "wu_hausman_p": 0.0018484726496050818
+  },
+  "iv_simple": {
+    "spec_name": "简单替代工具变量",
+    "role": "simple",
+    "instrument_desc": "滞后一期同行业同年其他企业平均补助",
+    "sample_size": 49741,
+    "n_clusters": 5061,
+    "partial_r2": 0.013561933791797709,
+    "partial_f": 105.45599748235924,
+    "second_stage_coef": -0.010939600910183124,
+    "second_stage_se": 0.008273172825753034,
+    "second_stage_t": -1.3222981243822123,
+    "second_stage_p": 0.18606889710059749,
+    "overid_p": NaN,
+    "overid_wooldridge_p": NaN,
+    "wu_hausman_p": 0.004213582881410383
+  },
+  "iv_refined": {
+    "spec_name": "精炼双工具变量",
+    "role": "refined",
+    "instrument_desc": "滞后一期同行业同年排除本省平均补助 + 同省同行业同年排除本市平均补助",
+    "sample_size": 38620,
+    "n_clusters": 4516,
+    "partial_r2": 0.013002155109343883,
+    "partial_f": 77.74384222218615,
+    "second_stage_coef": -0.023280708124392896,
+    "second_stage_se": 0.01078422984028454,
+    "second_stage_t": -2.158773363437388,
+    "second_stage_p": 0.03086775394303487,
+    "overid_p": 0.040235319302277306,
+    "overid_wooldridge_p": 0.04989667164319456,
+    "wu_hausman_p": 9.965624252483707e-07
+  },
+  "heckman": {
+    "selection_sample_size": 45396,
+    "outcome_sample_size": 40679,
+    "selection_rate": 0.8969733016124769,
+    "exclusion_col": "IV_lnSubsidy_l1",
+    "exclusion_coef": 0.05953835526140172,
+    "exclusion_p": 4.940425856073972e-15,
+    "imr_coef": -0.1771596086599376,
+    "imr_p": 0.00558371212659603,
+    "subsidy_coef": 0.009254556295993838,
+    "subsidy_p": 0.007950919953223723,
+    "subsidy_t": 2.6542955329316555
+  },
+  "placebo": {
+    "未来一期补贴安慰剂": {
+      "key_var": "lnSubsidy_f1",
+      "coef": 0.0018211433946092284,
+      "se": 0.0009225498246537334,
+      "t_value": 1.9740325627320672,
+      "p_value": 0.048384440297341014,
+      "sample_size": 47994,
+      "n_clusters": 5036,
+      "r_squared": 0.014015765348584508
+    },
+    "未来两期补贴安慰剂": {
+      "key_var": "lnSubsidy_f2",
+      "coef": 0.0023798609573284974,
+      "se": 0.0009453695282371421,
+      "t_value": 2.5173869965602687,
+      "p_value": 0.011826920921328199,
+      "sample_size": 43253,
+      "n_clusters": 4793,
+      "r_squared": 0.012960272901250236
+    }
+  },
+  "event_study": {
+    "threshold_quantile": 0.75,
+    "threshold_value": 34978824.08,
+    "window": 3,
+    "treated_firms": 2237,
+    "all_firms": 5124,
+    "sample_size": 52805,
+    "n_clusters": 5124,
+    "pretrend_p": 0.5987181310033783,
+    "posttrend_p": 0.060038729114163636,
+    "pretrend_stat": 1.0259287151103649,
+    "posttrend_stat": 9.042792406958156,
+    "omitted_period": -1
   },
   "vif": {
-    "max": 1.6731702710050294,
-    "mean": 1.2472202233331882
+    "max": 1.6774301920205241,
+    "mean": 1.2484643933489656
   },
   "power_fa": {
-    "kmo_overall": 0.5740490627837397,
-    "variance_explained_ratio": 0.22372044820294615
+    "kmo_overall": 0.5766108239676554,
+    "variance_explained_ratio": 0.3912895307608829
   },
   "bp_test": {
-    "lm_stat": 1052.9792904941332,
-    "lm_pvalue": 2.5521717596633505e-193,
-    "f_stat": 25.559996144796607,
-    "f_pvalue": 1.911837513384879e-195
+    "lm_stat": 1036.4233188363646,
+    "lm_pvalue": 7.321722895481969e-190,
+    "f_stat": 25.1502849679288,
+    "f_pvalue": 6.423776769067753e-192
   },
   "wooldridge_test": {
-    "rho": -0.21777069481859196,
-    "se": 0.00837133072232249,
-    "t_stat": 33.713792292165955,
+    "rho": -0.217736632719302,
+    "se": 0.008366352209839488,
+    "t_stat": 33.73792546633813,
     "pvalue": 0.0,
-    "sample_size": 38663,
-    "n_clusters": 4399
+    "sample_size": 38645,
+    "n_clusters": 4398
   }
 }

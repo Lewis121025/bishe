@@ -9,6 +9,7 @@
 - `results/regression_tables.txt`：论文表格的文本版汇总
 - `scripts/regression_analysis.py`：主实证分析脚本
 - `scripts/ml_analysis.py`：机器学习补充分析脚本
+- `scripts/update_embedded_markdown.sh`：一键更新带图片的自包含 Markdown 版本
 
 ## 目录结构
 
@@ -30,6 +31,7 @@ python scripts/regression_analysis.py
 python scripts/generate_tables.py
 python scripts/generate_tables_docx.py
 python scripts/ml_analysis.py
+./scripts/update_embedded_markdown.sh
 ```
 
 说明：
@@ -37,6 +39,7 @@ python scripts/ml_analysis.py
 - 所有脚本已改为基于脚本自身位置解析仓库路径，不再依赖作者本机的绝对路径。
 - 运行后，核心结果会写入 `results/` 目录。
 - `scripts/panel_regressions.py` 是额外的纯 Python 面板回归检验脚本，依赖 `results/regression_dataset.csv`。
+- 若更新了论文主文件并需要同步生成带图片的单文件 Markdown，可直接运行 `./scripts/update_embedded_markdown.sh`，输出为 `thesis_final_bundle/thesis_final_humanized_v2_embedded.md`。
 
 ## 运行环境
 

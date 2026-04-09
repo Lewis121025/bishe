@@ -21,6 +21,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+import matplotlib.pyplot as plt
 from scipy import stats
 from statsmodels.multivariate.factor import Factor
 from statsmodels.stats.diagnostic import het_breuschpagan
@@ -40,6 +41,67 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # I: 信息传输软件和信息技术服务业, N: 水利环境和公共设施管理业
 REGULATED_INDUSTRY_SECTORS = {"B", "D", "G", "I", "N"}
 
+EASTERN_REGION_PREFIXES = {
+    "北京市",
+    "天津市",
+    "河北省",
+    "辽宁省",
+    "上海市",
+    "江苏省",
+    "浙江省",
+    "福建省",
+    "山东省",
+    "广东省",
+    "海南省",
+}
+
+NON_EASTERN_REGION_PREFIXES = {
+    "山西省",
+    "吉林省",
+    "黑龙江省",
+    "安徽省",
+    "江西省",
+    "河南省",
+    "湖北省",
+    "湖南省",
+    "广西壮族自治区",
+    "重庆市",
+    "四川省",
+    "贵州省",
+    "云南省",
+    "西藏自治区",
+    "陕西省",
+    "甘肃省",
+    "青海省",
+    "宁夏回族自治区",
+    "新疆维吾尔自治区",
+    "内蒙古自治区",
+}
+
+SPECIAL_REGION_PREFIXES = sorted(
+    EASTERN_REGION_PREFIXES | NON_EASTERN_REGION_PREFIXES,
+    key=len,
+    reverse=True,
+)
+
+CITY_FALLBACK_PREFIXES = {
+    "北京": 0,
+    "天津": 0,
+    "上海": 0,
+    "重庆": 1,
+}
+
+MUNICIPALITY_CITY_TO_PROVINCE = {
+    "北京市": "北京市",
+    "天津市": "天津市",
+    "上海市": "上海市",
+    "重庆市": "重庆市",
+    "北京": "北京市",
+    "天津": "天津市",
+    "上海": "上海市",
+    "重庆": "重庆市",
+}
+
 # 实控人性质代码口径（用于央企/地方国企分组）
 # 2100: 中央国有企业
 # 2120: 地方国有企业
@@ -54,8 +116,12 @@ GROUPED_BOOTSTRAP_TRIGGER_P = 0.10
 FE_CONTROL_VARS = ["Roa", "Lever", "Top1"]
 BASE_SUBSIDY_COL = "lnSubsidy"
 BASE_SUBSIDY_LAG_COL = "lnSubsidy_l1"
+BASE_SUBSIDY_LEAD1_COL = "lnSubsidy_f1"
+BASE_SUBSIDY_LEAD2_COL = "lnSubsidy_f2"
 ALT_SUBSIDY_COL = "lnSubsidy_pos"
 ALT_SUBSIDY_LAG_COL = "lnSubsidy_pos_l1"
+EVENT_STUDY_THRESHOLD_QUANTILE = 0.75
+EVENT_STUDY_WINDOW = 3
 SPECIAL_TREATMENT_PREFIX_PATTERN = re.compile(
     r"^(?:[A-Z]+)?(?:S\*ST|\*ST|SST|PT|ST)",
     re.IGNORECASE,
@@ -84,6 +150,118 @@ def _controller_first_code(value):
     if code.endswith(".0"):
         code = code[:-2]
     return code
+
+
+def _extract_region_prefix(address):
+    """从注册地址/办公地址中提取省级行政区前缀。"""
+    if pd.isna(address):
+        return None
+    text = str(address).strip()
+    if not text or text in {"None", "nan", "NaN"}:
+        return None
+    for prefix in SPECIAL_REGION_PREFIXES:
+        if prefix in text:
+            return prefix
+    return None
+
+
+def _classify_zone_from_location(city, address_register=None, address_office=None):
+    """按注册地址优先、办公地址次之、城市名兜底的规则划分东部/中西部。"""
+    for address in (address_register, address_office):
+        region_prefix = _extract_region_prefix(address)
+        if region_prefix in EASTERN_REGION_PREFIXES:
+            return 0
+        if region_prefix in NON_EASTERN_REGION_PREFIXES:
+            return 1
+
+    if pd.isna(city):
+        return np.nan
+    city_text = str(city).strip()
+    if not city_text or city_text in {"None", "nan", "NaN"}:
+        return np.nan
+    for prefix, zone in CITY_FALLBACK_PREFIXES.items():
+        if city_text.startswith(prefix):
+            return zone
+    return np.nan
+
+
+def _extract_province_from_location(city, address_register=None, address_office=None):
+    """提取公司所在省级行政区，用于构造省级工具变量。"""
+    for address in (address_register, address_office):
+        region_prefix = _extract_region_prefix(address)
+        if region_prefix is not None:
+            return region_prefix
+
+    if pd.isna(city):
+        return np.nan
+    city_text = str(city).strip()
+    if not city_text or city_text in {"None", "nan", "NaN"}:
+        return np.nan
+    return MUNICIPALITY_CITY_TO_PROVINCE.get(city_text, np.nan)
+
+
+def _build_leave_one_out_mean(df, group_cols, value_col, output_col):
+    """按组构造留一法均值工具变量。"""
+    group_sum = df.groupby(group_cols)[value_col].transform(lambda x: x.sum(skipna=True))
+    group_count = df.groupby(group_cols)[value_col].transform(lambda x: x.count())
+    df[output_col] = np.where(
+        group_count > 1,
+        (group_sum - df[value_col].fillna(0)) / (group_count - 1),
+        np.nan,
+    )
+    return df
+
+
+def _build_leave_one_out_positive_share(df, group_cols, value_col, output_col):
+    """按组构造留一法正补助占比，用于 Heckman 选择方程排除变量。"""
+    positive_flag = (df[value_col].fillna(0) > 0).astype(float)
+    tmp = df.assign(_positive_flag=positive_flag)
+    group_count = tmp.groupby(group_cols)["_positive_flag"].transform("count")
+    positive_sum = tmp.groupby(group_cols)["_positive_flag"].transform("sum")
+    df[output_col] = np.where(
+        group_count > 1,
+        (positive_sum - positive_flag) / (group_count - 1),
+        np.nan,
+    )
+    return df
+
+
+def _build_industry_year_excluding_province_mean(df, output_col, value_col=BASE_SUBSIDY_COL):
+    """构造同行业同年、排除本省后的平均补贴工具变量。"""
+    values = pd.Series(np.nan, index=df.index, dtype=float)
+    for _, group in df.groupby(["IndustrySector", "Year"], sort=False):
+        province_sum = group.groupby("Province")[value_col].sum(min_count=1)
+        province_count = group.groupby("Province")[value_col].count()
+        total_sum = group[value_col].sum(skipna=True)
+        total_count = group[value_col].count()
+        for idx, row in group.iterrows():
+            province = row.get("Province")
+            if pd.isna(province):
+                continue
+            adjusted_sum = total_sum - province_sum.get(province, 0)
+            adjusted_count = total_count - province_count.get(province, 0)
+            if adjusted_count > 0:
+                values.at[idx] = adjusted_sum / adjusted_count
+    df[output_col] = values
+    return df
+
+
+def _build_province_industry_excluding_city_mean(df, output_col, value_col=BASE_SUBSIDY_COL):
+    """构造同省同行业同年、排除本市后的平均补贴工具变量。"""
+    values = pd.Series(np.nan, index=df.index, dtype=float)
+    for _, group in df.groupby(["Province", "IndustrySector", "Year"], sort=False):
+        city_sum = group.groupby("City")[value_col].sum(min_count=1)
+        city_count = group.groupby("City")[value_col].count()
+        total_sum = group[value_col].sum(skipna=True)
+        total_count = group[value_col].count()
+        for idx, row in group.iterrows():
+            city = row.get("City")
+            adjusted_sum = total_sum - city_sum.get(city, 0)
+            adjusted_count = total_count - city_count.get(city, 0)
+            if adjusted_count > 0:
+                values.at[idx] = adjusted_sum / adjusted_count
+    df[output_col] = values
+    return df
 
 
 def _format_pvalue(pvalue):
@@ -351,7 +529,7 @@ def load_and_clean_data(data_dir):
     df_loc["Symbol"] = df_loc["Symbol"].apply(lambda x: f"{int(x):06d}")
     df_loc["Year"] = pd.to_datetime(df_loc["EndDate"]).dt.year
     df_loc = df_loc.sort_values("EndDate").groupby(["Symbol", "Year"]).last().reset_index()
-    df_loc = df_loc[["Symbol", "Year", "Ownership", "City"]]
+    df_loc = df_loc[["Symbol", "Year", "Ownership", "City", "ADDRESS_REGISTER", "ADDRESS_OFFICE"]]
     print(f"  {len(df_loc)} 行")
 
     # --- 6. 第一大股东持股比例 + 实际控制人股权性质 ---
@@ -488,38 +666,30 @@ def construct_variables(df):
     # Top1 = 第一大股东持股比例 (已有)
     df["Top1"] = df["LargestHolderRate"]
 
-    # 4. Zone 区域虚拟变量：东部=0, 中西部=1
-    print("4. 构造区域变量 Zone...")
-    eastern_cities = [
-        "北京市", "天津市", "上海市",  # 注：重庆属于西部地区，不纳入东部
-        "石家庄市", "唐山市", "秦皇岛市", "邯郸市", "保定市", "沧州市", "廊坊市", "衡水市",  # 河北
-        "沈阳市", "大连市", "鞍山市", "抚顺市", "本溪市", "丹东市", "锦州市", "营口市",  # 辽宁
-        "南京市", "无锡市", "徐州市", "常州市", "苏州市", "南通市", "连云港市", "淮安市",  # 江苏
-        "盐城市", "扬州市", "镇江市", "泰州市", "宿迁市",
-        "杭州市", "宁波市", "温州市", "嘉兴市", "湖州市", "绍兴市", "金华市", "台州市",  # 浙江
-        "福州市", "厦门市", "莆田市", "泉州市", "漳州市", "龙岩市", "三明市", "南平市",  # 福建
-        "济南市", "青岛市", "烟台市", "威海市", "潍坊市", "淄博市", "枣庄市", "东营市",  # 山东
-        "济宁市", "泰安市", "临沂市", "德州市", "聊城市", "滨州市", "菏泽市",
-        "广州市", "深圳市", "珠海市", "汕头市", "佛山市", "东莞市", "中山市", "惠州市",  # 广东
-        "江门市", "湛江市", "茂名市", "肇庆市", "梅州市", "揭阳市",
-        "海口市", "三亚市",  # 海南
-    ]
-    # 也可以基于省份来判断
-    eastern_provinces = ["北京", "天津", "河北", "辽宁", "上海", "江苏", "浙江",
-                         "福建", "山东", "广东", "海南"]
-
-    def classify_zone(city):
-        if pd.isna(city):
-            return np.nan
-        for prov in eastern_provinces:
-            if prov in str(city):
-                return 0  # 东部
-        for c in eastern_cities:
-            if str(city) in c or c in str(city):
-                return 0
-        return 1  # 中西部
-
-    df["Zone"] = df["City"].apply(classify_zone)
+    # 4. Zone 区域虚拟变量：东部=0, 中西部=1；Province 用于省级工具变量
+    print("4. 构造区域变量 Zone 与 Province...")
+    df["Zone"] = df.apply(
+        lambda row: _classify_zone_from_location(
+            row.get("City"),
+            row.get("ADDRESS_REGISTER"),
+            row.get("ADDRESS_OFFICE"),
+        ),
+        axis=1,
+    )
+    df["Province"] = df.apply(
+        lambda row: _extract_province_from_location(
+            row.get("City"),
+            row.get("ADDRESS_REGISTER"),
+            row.get("ADDRESS_OFFICE"),
+        ),
+        axis=1,
+    )
+    zone_missing = int(df["Zone"].isna().sum())
+    if zone_missing > 0:
+        print(f"   Zone 无法识别的样本数: {zone_missing}")
+    province_missing = int(df["Province"].isna().sum())
+    if province_missing > 0:
+        print(f"   Province 无法识别的样本数: {province_missing}")
 
     # 5. Industry 行业分类（用于生成行业虚拟变量）
     print("5. 构造行业分类变量 IndustrySector...")
@@ -596,18 +766,40 @@ def construct_variables(df):
     print("9. 构造滞后变量与工具变量...")
     # 构建滞后一期补贴变量
     df = df.sort_values(["Symbol", "Year"])
+    df["SubsidyAmount_l1"] = df.groupby("Symbol")["SubsidyAmount"].shift(1)
     df[BASE_SUBSIDY_LAG_COL] = df.groupby("Symbol")[BASE_SUBSIDY_COL].shift(1)
     df[ALT_SUBSIDY_LAG_COL] = df.groupby("Symbol")[ALT_SUBSIDY_COL].shift(1)
-    
-    # 构建工具变量：同城市同年度其他企业的平均补贴
-    city_year_sum = df.groupby(["City", "Year"])[BASE_SUBSIDY_COL].transform(lambda x: x.sum(skipna=True))
-    city_year_count = df.groupby(["City", "Year"])[BASE_SUBSIDY_COL].transform(lambda x: x.count())
-    df["IV_lnSubsidy"] = np.where(
-        city_year_count > 1,
-        (city_year_sum - df[BASE_SUBSIDY_COL].fillna(0)) / (city_year_count - 1),
-        np.nan
-    )
-    df["IV_lnSubsidy_l1"] = df.groupby("Symbol")["IV_lnSubsidy"].shift(1)
+    df[BASE_SUBSIDY_LEAD1_COL] = df.groupby("Symbol")[BASE_SUBSIDY_COL].shift(-1)
+    df[BASE_SUBSIDY_LEAD2_COL] = df.groupby("Symbol")[BASE_SUBSIDY_COL].shift(-2)
+
+    # 单工具与双工具候选：同城、同行业、同城同行业留一法平均补贴
+    df = _build_leave_one_out_mean(df, ["City", "Year"], BASE_SUBSIDY_COL, "IV_city_year")
+    df = _build_leave_one_out_mean(df, ["IndustrySector", "Year"], BASE_SUBSIDY_COL, "IV_industry_year")
+    df = _build_leave_one_out_mean(df, ["City", "IndustrySector", "Year"], BASE_SUBSIDY_COL, "IV_city_industry_year")
+    df = _build_leave_one_out_mean(df, ["Province", "Year"], BASE_SUBSIDY_COL, "IV_province_year")
+    df = _build_industry_year_excluding_province_mean(df, "IV_industry_excl_province")
+    df = _build_province_industry_excluding_city_mean(df, "IV_province_industry_excl_city")
+
+    for iv_col in [
+        "IV_city_year",
+        "IV_industry_year",
+        "IV_city_industry_year",
+        "IV_province_year",
+        "IV_industry_excl_province",
+        "IV_province_industry_excl_city",
+    ]:
+        df[f"{iv_col}_l1"] = df.groupby("Symbol")[iv_col].shift(1)
+
+    # 保留旧字段名兼容既有导出与校验逻辑
+    df["IV_lnSubsidy"] = df["IV_city_year"]
+    df["IV_lnSubsidy_l1"] = df["IV_city_year_l1"]
+
+    # Heckman 选择方程用到的正补助占比（留一法）
+    df = _build_leave_one_out_positive_share(df, ["City", "Year"], "SubsidyAmount", "IV_city_posshare")
+    df = _build_leave_one_out_positive_share(df, ["Province", "Year"], "SubsidyAmount", "IV_province_posshare")
+    df = _build_leave_one_out_positive_share(df, ["IndustrySector", "Year"], "SubsidyAmount", "IV_industry_posshare")
+    for share_col in ["IV_city_posshare", "IV_province_posshare", "IV_industry_posshare"]:
+        df[f"{share_col}_l1"] = df.groupby("Symbol")[share_col].shift(1)
 
     print(f"\n变量构造完成。当前列: {list(df.columns)}")
     return df
@@ -962,7 +1154,7 @@ def compute_overpay(df):
 
 
 # ============================================================
-# 第五部分：管理层权力 Power（FA 经验性综合口径，熵值法与 PCA 为对照）
+# 第五部分：管理层权力 Power（FA 经验性综合口径，PCA 为对照）
 # ============================================================
 
 def _calc_shared_factor_diagnostics(df_complete, power_vars):
@@ -1032,68 +1224,100 @@ def _standardize_power_inputs(df_complete, power_vars):
 
 
 def _compute_pca_power(standardized_df, power_vars):
-    """PCA 对照口径。"""
-    pca = PCA(n_components=1)
-    raw_scores = pca.fit_transform(standardized_df).flatten()
-    scores, sign = _orient_power_scores(raw_scores, standardized_df)
-    loadings = pca.components_[0] * sign
+    """PCA 对照口径：提取前两个主成分并按方差贡献率加权形成综合得分。"""
+    n_components = min(2, len(power_vars))
+    pca = PCA(n_components=n_components)
+    raw_scores = pca.fit_transform(standardized_df)
+
+    oriented_scores = raw_scores.copy()
+    component_signs = []
+    loadings_matrix = pca.components_.copy()
+    for idx in range(n_components):
+        score_vec, sign = _orient_power_scores(raw_scores[:, idx], standardized_df)
+        oriented_scores[:, idx] = score_vec
+        loadings_matrix[idx, :] = loadings_matrix[idx, :] * sign
+        component_signs.append(sign)
+
+    component_weights = pca.explained_variance_ratio_ / np.sum(pca.explained_variance_ratio_)
+    composite_raw = oriented_scores @ component_weights
+    composite_std = np.std(composite_raw, ddof=0)
+    if composite_std < 1e-12:
+        composite_scores = np.zeros_like(composite_raw)
+    else:
+        composite_scores = (composite_raw - composite_raw.mean()) / composite_std
+    composite_loadings = loadings_matrix.T @ component_weights
+
+    loadings = {var: float(val) for var, val in zip(power_vars, composite_loadings)}
+    pc1_loadings = {var: float(val) for var, val in zip(power_vars, loadings_matrix[0, :])}
+    pc2_loadings = {var: float(val) for var, val in zip(power_vars, loadings_matrix[1, :])} if n_components >= 2 else {var: np.nan for var in power_vars}
     return {
-        "scores": pd.Series(scores, index=standardized_df.index),
-        "loadings": {var: float(val) for var, val in zip(power_vars, loadings)},
+        "scores": pd.Series(composite_scores, index=standardized_df.index),
+        "loadings": loadings,
+        "pc1_loadings": pc1_loadings,
+        "pc2_loadings": pc2_loadings,
+        "component_weights": {f"PC{i + 1}": float(weight) for i, weight in enumerate(component_weights)},
+        "n_components": int(n_components),
         "explained_variance_ratio_pc1": float(pca.explained_variance_ratio_[0]),
+        "explained_variance_ratio_pc2": float(pca.explained_variance_ratio_[1]) if n_components >= 2 else np.nan,
         "cum_explained_variance_pc2": float(np.sum(pca.explained_variance_ratio_[:2])),
         "cum_explained_variance_pc3": float(np.sum(pca.explained_variance_ratio_[:3])),
     }
 
 
 def _compute_fa_power(standardized_df, power_vars):
-    """因子分析主口径。"""
-    fa_result = Factor(standardized_df.to_numpy(), n_factor=1, method="pa").fit()
-    loadings = np.asarray(fa_result.loadings).flatten()
-    score_weights = np.asarray(fa_result.factor_score_params()).flatten()
-    raw_scores = standardized_df.to_numpy() @ score_weights
-    scores, sign = _orient_power_scores(raw_scores, standardized_df)
-    loadings = loadings * sign
-    score_weights = score_weights * sign
-    ss_loading = float(np.sum(loadings ** 2))
-    variance_ratio = ss_loading / len(power_vars)
+    """因子分析主口径：提取前两个公因子，旋转后按方差贡献率合成为综合得分。"""
+    n_factors = min(2, len(power_vars))
+    fa_result = Factor(standardized_df.to_numpy(), n_factor=n_factors, method="pa").fit()
+    if n_factors >= 2:
+        fa_result.rotate("varimax")
+    loadings_matrix = np.asarray(fa_result.loadings, dtype=float)
+    score_weight_matrix = np.asarray(fa_result.factor_score_params(), dtype=float)
+    raw_scores = standardized_df.to_numpy() @ score_weight_matrix
+
+    oriented_scores = raw_scores.copy()
+    oriented_loadings = loadings_matrix.copy()
+    oriented_score_weights = score_weight_matrix.copy()
+    for idx in range(n_factors):
+        score_vec, sign = _orient_power_scores(raw_scores[:, idx], standardized_df)
+        oriented_scores[:, idx] = score_vec
+        oriented_loadings[:, idx] = oriented_loadings[:, idx] * sign
+        oriented_score_weights[:, idx] = oriented_score_weights[:, idx] * sign
+
+    ss_loadings = np.sum(oriented_loadings ** 2, axis=0)
+    if float(np.sum(ss_loadings)) < 1e-12:
+        component_weights = np.ones(n_factors, dtype=float) / n_factors
+    else:
+        component_weights = ss_loadings / np.sum(ss_loadings)
+
+    composite_raw = oriented_scores @ component_weights
+    composite_std = np.std(composite_raw, ddof=0)
+    if composite_std < 1e-12:
+        composite_scores = np.zeros_like(composite_raw)
+    else:
+        composite_scores = (composite_raw - composite_raw.mean()) / composite_std
+
+    composite_loadings = oriented_loadings @ component_weights
+    composite_score_weights = oriented_score_weights @ component_weights
+    variance_ratio = float(np.sum(ss_loadings) / len(power_vars))
+    fa1_loadings = {var: float(val) for var, val in zip(power_vars, oriented_loadings[:, 0])}
+    fa2_loadings = (
+        {var: float(val) for var, val in zip(power_vars, oriented_loadings[:, 1])}
+        if n_factors >= 2 else
+        {var: np.nan for var in power_vars}
+    )
     return {
-        "scores": pd.Series(scores, index=standardized_df.index),
-        "loadings": {var: float(val) for var, val in zip(power_vars, loadings)},
-        "score_weights": {var: float(val) for var, val in zip(power_vars, score_weights)},
+        "scores": pd.Series(composite_scores, index=standardized_df.index),
+        "loadings": {var: float(val) for var, val in zip(power_vars, composite_loadings)},
+        "fa1_loadings": fa1_loadings,
+        "fa2_loadings": fa2_loadings,
+        "score_weights": {var: float(val) for var, val in zip(power_vars, composite_score_weights)},
         "communalities": {var: float(val) for var, val in zip(power_vars, fa_result.communality)},
         "uniqueness": {var: float(val) for var, val in zip(power_vars, fa_result.uniqueness)},
-        "ss_loading": ss_loading,
+        "component_weights": {f"FA{i + 1}": float(weight) for i, weight in enumerate(component_weights)},
+        "ss_loading": float(np.sum(ss_loadings)),
+        "ss_loadings": {f"FA{i + 1}": float(val) for i, val in enumerate(ss_loadings)},
+        "n_factors": int(n_factors),
         "variance_explained_ratio": float(variance_ratio),
-    }
-
-
-def _compute_entropy_power(df_complete, power_vars):
-    """熵值法稳健性口径。"""
-    data = df_complete[power_vars].astype(float).copy()
-    min_vals = data.min(axis=0)
-    ranges = data.max(axis=0) - min_vals
-    ranges = ranges.replace(0, 1.0)
-    normalized = (data - min_vals) / ranges
-    normalized = normalized.clip(lower=0)
-
-    eps = 1e-12
-    prob = normalized.div(np.clip(normalized.sum(axis=0), eps, None), axis=1)
-    k = 1.0 / np.log(len(normalized))
-    entropy = -(k * (prob * np.log(np.clip(prob, eps, None))).sum(axis=0))
-    divergence = 1 - entropy
-    if float(divergence.sum()) <= eps:
-        weights = pd.Series(np.repeat(1.0 / len(power_vars), len(power_vars)), index=power_vars)
-    else:
-        weights = divergence / divergence.sum()
-
-    score_raw = normalized.to_numpy() @ weights.to_numpy()
-    score_std = (score_raw - score_raw.mean()) / np.std(score_raw, ddof=0)
-    return {
-        "scores": pd.Series(score_std, index=df_complete.index),
-        "weights": {var: float(val) for var, val in weights.items()},
-        "entropy": {var: float(val) for var, val in entropy.items()},
-        "redundancy": {var: float(val) for var, val in divergence.items()},
     }
 
 
@@ -1101,14 +1325,14 @@ def compute_power(df, return_diagnostics=False):
     """
     管理层权力构造：
       1. FA（因子分析）作为正文采用的经验性综合口径
-      2. 熵值法作为对照口径
-      3. PCA 作为对照口径，用于说明单一主成分代表性有限
+      2. PCA 作为对照口径：提取前两个主成分并形成综合得分
     """
     print("\n" + "=" * 70)
-    print("第五部分：管理层权力综合指标（FA经验性综合口径，熵值法与PCA为对照）")
+    print("第五部分：管理层权力综合指标（FA经验性综合口径，PCA为对照）")
     print("=" * 70)
 
-    power_vars = ["Tenure", "Dual", "Boardsize", "Insider", "Mgshder"]
+    # Tenure 在旧口径下共同度极低，因此从 FA/PCA 综合指标中剔除。
+    power_vars = ["Dual", "Boardsize", "Insider", "Mgshder"]
     for var in power_vars:
         missing = df[var].isna().sum()
         total = len(df)
@@ -1123,12 +1347,11 @@ def compute_power(df, return_diagnostics=False):
         "main_power_col": "Power_FA",
         "pca": {},
         "fa": {},
-        "entropy": {},
     }
 
     if len(df_power) < 100:
         print("  WARNING: 样本量过少，跳过 Power 构造。")
-        for col in ["Power", "Power_FA", "Power_PCA", "Power_entropy"]:
+        for col in ["Power", "Power_FA", "Power_PCA"]:
             df[col] = np.nan
         df.attrs["power_diagnostics"] = diagnostics
         return (df, diagnostics) if return_diagnostics else df
@@ -1137,17 +1360,12 @@ def compute_power(df, return_diagnostics=False):
     shared_diag = _calc_shared_factor_diagnostics(standardized, power_vars)
     pca_result = _compute_pca_power(standardized, power_vars)
     fa_result = _compute_fa_power(standardized, power_vars)
-    entropy_result = _compute_entropy_power(df_power, power_vars)
 
     diagnostics["pca"] = {**shared_diag, **pca_result}
     diagnostics["fa"] = {
         **shared_diag,
         **fa_result,
         "average_communality": float(np.mean(list(fa_result["communalities"].values()))),
-    }
-    diagnostics["entropy"] = {
-        "n_obs": int(len(df_power)),
-        **entropy_result,
     }
 
     print(f"\n  共同适用性检验: KMO = {shared_diag['kmo_overall']:.4f}")
@@ -1157,18 +1375,21 @@ def compute_power(df, return_diagnostics=False):
         f"  Bartlett 球形检验: Chi² = {shared_diag['bartlett_chi2']:.4f}, "
         f"df = {shared_diag['bartlett_df']}, p = {_format_pvalue(shared_diag['bartlett_p'])}"
     )
-    print(f"\n  PCA 第一主成分方差贡献率 = {pca_result['explained_variance_ratio_pc1']:.4f}")
-    print("  解释：PCA 仅显示存在基本共同性，但单一主成分代表性有限，因此仅作对照。")
-    print(f"\n  FA 单因子方差解释率 = {fa_result['variance_explained_ratio']:.4f}")
+    print(
+        f"\n  PCA 前两主成分方差贡献率 = "
+        f"{pca_result['explained_variance_ratio_pc1']:.4f} + {pca_result['explained_variance_ratio_pc2']:.4f}"
+    )
+    print(f"  PCA 前两主成分累计方差贡献率 = {pca_result['cum_explained_variance_pc2']:.4f}")
+    print("  解释：PCA 对照口径使用前两个主成分加权形成综合得分，以避免单一主成分代表性不足。")
+    print(f"\n  FA 前两因子累计方差解释率 = {fa_result['variance_explained_ratio']:.4f}")
     print(f"  FA 平均共同度 = {diagnostics['fa']['average_communality']:.4f}")
-    print("  解释：FA 仅作为正文采用的经验性综合口径，需结合较低 KMO 与有限方差解释率审慎解读。")
+    print("  解释：FA 以前两个经 varimax 旋转的公因子按载荷平方和占比合成为经验性综合口径，仍需结合较低 KMO 审慎解读。")
 
     score_df = pd.DataFrame({
         "Symbol": df_power["Symbol"].to_numpy(),
         "Year": df_power["Year"].to_numpy(),
         "Power_PCA": pca_result["scores"].to_numpy(),
         "Power_FA": fa_result["scores"].to_numpy(),
-        "Power_entropy": entropy_result["scores"].to_numpy(),
     })
     score_df["Power"] = score_df["Power_FA"]
 
@@ -1211,6 +1432,20 @@ def _build_fe_matrix(df_subset, core_vars):
 
 def _fit_with_cluster_se(y, X, groups=None):
     """PanelOLS 回归 + 公司固定效应 + 年份固定效应 + 公司层面聚类稳健标准误"""
+    if isinstance(X, pd.DataFrame):
+        X = pd.DataFrame(
+            X.to_numpy(dtype=float),
+            index=X.index,
+            columns=X.columns,
+        )
+        X.attrs = {}
+    if isinstance(y, pd.Series):
+        y = pd.Series(
+            y.to_numpy(dtype=float),
+            index=y.index,
+            name=y.name,
+        )
+        y.attrs = {}
     model = PanelOLS(
         y,
         X,
@@ -1284,6 +1519,28 @@ def _fit_model2(df_sub, control_vars, subsidy_col=BASE_SUBSIDY_LAG_COL):
     }
 
 
+def _as_list(value):
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _extract_test_result(test_obj):
+    """统一提取 linearmodels 统计检验对象结果。"""
+    if test_obj is None:
+        return None
+    stat = getattr(test_obj, "stat", None)
+    pval = getattr(test_obj, "pval", None)
+    if stat is None or pval is None:
+        return None
+    return {
+        "stat": float(stat),
+        "pval": float(pval),
+        "df": getattr(test_obj, "df", None),
+        "name": str(getattr(test_obj, "null", "")),
+    }
+
+
 def _fit_iv_with_fe(
     df,
     control_vars,
@@ -1292,7 +1549,8 @@ def _fit_iv_with_fe(
     instrument_col="IV_lnSubsidy_l1",
 ):
     """以公司内去均值 + 年份虚拟变量的方式实现 FE-2SLS。"""
-    needed = [dep_var, endog_col, instrument_col, "Symbol", "Year"] + control_vars
+    instrument_cols = _as_list(instrument_col)
+    needed = [dep_var, endog_col, "Symbol", "Year"] + control_vars + instrument_cols
     df_iv = df.dropna(subset=needed).copy()
     if len(df_iv) < 100:
         return None
@@ -1300,7 +1558,7 @@ def _fit_iv_with_fe(
     year_dummies = pd.get_dummies(df_iv["Year"], prefix="Year", drop_first=True, dtype=float)
     base = pd.concat(
         [
-            df_iv[["Symbol", "Year", dep_var, endog_col, instrument_col] + control_vars].reset_index(drop=True),
+            df_iv[["Symbol", "Year", dep_var, endog_col] + control_vars + instrument_cols].reset_index(drop=True),
             year_dummies.reset_index(drop=True),
         ],
         axis=1,
@@ -1319,29 +1577,305 @@ def _fit_iv_with_fe(
         dependent=transformed[dep_var],
         exog=transformed[exog_cols],
         endog=transformed[endog_col],
-        instruments=transformed[instrument_col],
+        instruments=transformed[instrument_cols],
     ).fit(cov_type="clustered", clusters=clusters)
 
     first_stage_ols = sm.OLS(
         transformed[endog_col],
-        transformed[exog_cols + [instrument_col]],
+        transformed[exog_cols + instrument_cols],
     ).fit(cov_type="cluster", cov_kwds={"groups": clusters})
 
     diagnostics = iv_model.first_stage.diagnostics.loc[endog_col]
+    first_stage_terms = []
+    for col in instrument_cols:
+        first_stage_terms.append({
+            "instrument": col,
+            "coef": float(first_stage_ols.params.get(col, np.nan)),
+            "se": float(first_stage_ols.bse.get(col, np.nan)),
+            "p": float(first_stage_ols.pvalues.get(col, np.nan)),
+        })
+    primary_term = first_stage_terms[0] if first_stage_terms else {}
     return {
         "model": iv_model,
         "sample_size": int(len(df_iv)),
         "n_clusters": int(df_iv["Symbol"].nunique()),
         "year_fe_count": int(len(year_dummies.columns)),
+        "instrument_cols": instrument_cols,
+        "instrument_label": " + ".join(instrument_cols),
         "first_stage": {
-            "instrument": instrument_col,
-            "coef": float(first_stage_ols.params[instrument_col]),
-            "se": float(first_stage_ols.bse[instrument_col]),
-            "p": float(first_stage_ols.pvalues[instrument_col]),
+            "instrument": " + ".join(instrument_cols),
+            "coef": float(primary_term.get("coef", np.nan)),
+            "se": float(primary_term.get("se", np.nan)),
+            "p": float(primary_term.get("p", np.nan)),
             "rsquared": float(first_stage_ols.rsquared),
             "partial_r2": float(diagnostics["partial.rsquared"]),
             "f_stat": float(diagnostics["f.stat"]),
             "f_pval": float(diagnostics["f.pval"]),
+        },
+        "first_stage_terms": first_stage_terms,
+        "overid": _extract_test_result(getattr(iv_model, "sargan", None)),
+        "overid_wooldridge": _extract_test_result(getattr(iv_model, "wooldridge_overid", None)),
+        "wu_hausman": _extract_test_result(iv_model.wu_hausman()),
+    }
+
+
+def _fit_heckman_two_step(
+    df,
+    outcome_controls,
+    dep_var="Overpay",
+    subsidy_col=ALT_SUBSIDY_LAG_COL,
+    exclusion_col="IV_lnSubsidy_l1",
+):
+    """对仅正补助样本的替代口径实施 Heckman 两步校正。"""
+    df_h = df.sort_values(["Symbol", "Year"]).copy()
+    selection_lag_bases = ["Roa", "Lever", "Top1", "lnSale", "IA"]
+    for col in selection_lag_bases:
+        lag_col = f"{col}_l1sel"
+        if lag_col not in df_h.columns:
+            df_h[lag_col] = df_h.groupby("Symbol")[col].shift(1)
+
+    df_h["SelectedPosLag"] = (~df_h[subsidy_col].isna()).astype(int)
+    selection_cols = [exclusion_col, "Roa_l1sel", "Lever_l1sel", "Top1_l1sel", "lnSale_l1sel", "IA_l1sel", "Zone"]
+    needed = ["SelectedPosLag", "Symbol", "Year", "IndustrySector"] + selection_cols
+    selection_df = df_h.dropna(subset=needed).copy()
+    if len(selection_df) < 200:
+        return None
+
+    industry_dummies = pd.get_dummies(selection_df["IndustrySector"], prefix="Ind", drop_first=True, dtype=float)
+    year_dummies = pd.get_dummies(selection_df["Year"], prefix="Year", drop_first=True, dtype=float)
+    x_selection = pd.concat(
+        [
+            selection_df[selection_cols].reset_index(drop=True),
+            industry_dummies.reset_index(drop=True),
+            year_dummies.reset_index(drop=True),
+        ],
+        axis=1,
+    )
+    x_selection = sm.add_constant(x_selection)
+    probit_model = sm.Probit(
+        selection_df["SelectedPosLag"].reset_index(drop=True),
+        x_selection,
+    ).fit(
+        disp=False,
+        cov_type="cluster",
+        cov_kwds={"groups": selection_df["Symbol"].reset_index(drop=True)},
+    )
+
+    xb = x_selection @ probit_model.params
+    selection_prob = np.clip(stats.norm.cdf(xb), 1e-6, 1 - 1e-6)
+    selection_df = selection_df.reset_index(drop=True)
+    selection_df["IMR"] = stats.norm.pdf(xb) / selection_prob
+
+    outcome_needed = [dep_var, subsidy_col, "IMR", "Symbol", "Year"] + outcome_controls
+    outcome_df = selection_df[selection_df["SelectedPosLag"] == 1].copy()
+    outcome_df = outcome_df.dropna(subset=outcome_needed).copy()
+    if len(outcome_df) < 200:
+        return None
+
+    outcome_df = outcome_df.set_index(["Symbol", "Year"], drop=False)
+    outcome_x = outcome_df[[subsidy_col] + outcome_controls + ["IMR"]].astype(float)
+    outcome_model = _fit_with_cluster_se(outcome_df[dep_var], outcome_x)
+    return {
+        "selection_model": probit_model,
+        "outcome_model": outcome_model,
+        "selection_sample_size": int(len(selection_df)),
+        "outcome_sample_size": int(len(outcome_df)),
+        "selection_rate": float(selection_df["SelectedPosLag"].mean()),
+        "exclusion_col": exclusion_col,
+        "exclusion_coef": float(probit_model.params.get(exclusion_col, np.nan)),
+        "exclusion_p": float(probit_model.pvalues.get(exclusion_col, np.nan)),
+        "imr_coef": float(outcome_model.params.get("IMR", np.nan)),
+        "imr_p": float(outcome_model.pvalues.get("IMR", np.nan)),
+        "subsidy_coef": float(outcome_model.params.get(subsidy_col, np.nan)),
+        "subsidy_p": float(outcome_model.pvalues.get(subsidy_col, np.nan)),
+        "subsidy_t": float(outcome_model.tstats.get(subsidy_col, np.nan)),
+    }
+
+
+def _run_endogeneity_checks(df, control_vars):
+    """比较不同工具变量，并对正补助口径实施 Heckman 两步校正。"""
+    iv_specs = [
+        {
+            "spec_name": "基准工具变量",
+            "role": "benchmark",
+            "instrument_cols": ["IV_city_year_l1"],
+            "instrument_desc": "滞后一期同城同年其他企业平均补助",
+        },
+        {
+            "spec_name": "简单替代工具变量",
+            "role": "simple",
+            "instrument_cols": ["IV_industry_year_l1"],
+            "instrument_desc": "滞后一期同行业同年其他企业平均补助",
+        },
+        {
+            "spec_name": "精炼双工具变量",
+            "role": "refined",
+            "instrument_cols": ["IV_industry_excl_province_l1", "IV_province_industry_excl_city_l1"],
+            "instrument_desc": "滞后一期同行业同年排除本省平均补助 + 同省同行业同年排除本市平均补助",
+        },
+    ]
+
+    iv_results = []
+    comparison_rows = []
+    for spec in iv_specs:
+        result = _fit_iv_with_fe(df, control_vars, instrument_col=spec["instrument_cols"])
+        if result is None:
+            continue
+        result["spec_name"] = spec["spec_name"]
+        result["role"] = spec["role"]
+        result["instrument_desc"] = spec["instrument_desc"]
+        iv_results.append(result)
+        model = result["model"]
+        comparison_rows.append({
+            "spec_name": spec["spec_name"],
+            "role": spec["role"],
+            "instrument_desc": spec["instrument_desc"],
+            "sample_size": result["sample_size"],
+            "n_clusters": result["n_clusters"],
+            "partial_r2": float(result["first_stage"]["partial_r2"]),
+            "partial_f": float(result["first_stage"]["f_stat"]),
+            "second_stage_coef": float(model.params.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "second_stage_se": float(model.std_errors.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "second_stage_t": float(model.tstats.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "second_stage_p": float(model.pvalues.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "overid_p": float(result["overid"]["pval"]) if result.get("overid") else np.nan,
+            "overid_wooldridge_p": float(result["overid_wooldridge"]["pval"]) if result.get("overid_wooldridge") else np.nan,
+            "wu_hausman_p": float(result["wu_hausman"]["pval"]) if result.get("wu_hausman") else np.nan,
+        })
+
+    comparison_df = pd.DataFrame(comparison_rows)
+    refined_result = next((row for row in iv_results if row.get("role") == "refined"), None)
+    benchmark_result = next((row for row in iv_results if row.get("role") == "benchmark"), None)
+    simple_result = next((row for row in iv_results if row.get("role") == "simple"), None)
+    heckman_result = _fit_heckman_two_step(df, control_vars)
+    return {
+        "benchmark_iv_result": benchmark_result,
+        "simple_iv_result": simple_result,
+        "refined_iv_result": refined_result,
+        "iv_result": refined_result or simple_result or benchmark_result,
+        "iv_comparison": comparison_df,
+        "heckman_result": heckman_result,
+    }
+
+
+def _run_placebo_checks(df, control_vars):
+    """使用未来补贴开展安慰剂检验。"""
+    placebo_specs = [
+        ("未来一期补贴安慰剂", BASE_SUBSIDY_LEAD1_COL),
+        ("未来两期补贴安慰剂", BASE_SUBSIDY_LEAD2_COL),
+    ]
+    rows = []
+    for label, subsidy_col in placebo_specs:
+        fit_result = _fit_model2(df, control_vars, subsidy_col=subsidy_col)
+        if fit_result is None:
+            continue
+        model = fit_result["model"]
+        rows.append({
+            "check_item": label,
+            "key_var": subsidy_col,
+            "coef": float(model.params.get(subsidy_col, np.nan)),
+            "se": float(model.std_errors.get(subsidy_col, np.nan)),
+            "t_value": float(model.tstats.get(subsidy_col, np.nan)),
+            "p_value": float(model.pvalues.get(subsidy_col, np.nan)),
+            "sample_size": int(fit_result["sample_size"]),
+            "n_clusters": int(fit_result["n_clusters"]),
+            "r_squared": float(model.rsquared),
+        })
+    return pd.DataFrame(rows)
+
+
+def _event_term_name(k):
+    return f"event_m{abs(k)}" if k < 0 else f"event_{k}"
+
+
+def _wald_zero_test(model, term_names):
+    """对一组系数是否同时为 0 进行 Wald 检验。"""
+    available_terms = [term for term in term_names if term in model.params.index]
+    if not available_terms:
+        return None
+    param_names = list(model.params.index)
+    restriction = np.zeros((len(available_terms), len(param_names)))
+    for row_idx, term in enumerate(available_terms):
+        restriction[row_idx, param_names.index(term)] = 1.0
+    return _extract_test_result(model.wald_test(restriction))
+
+
+def _run_event_study(df, control_vars, threshold_quantile=EVENT_STUDY_THRESHOLD_QUANTILE, window=EVENT_STUDY_WINDOW):
+    """围绕首次大额补贴暴露年份开展事件研究。
+
+    事件年定义为：公司首次出现“上一年补贴金额位于正补贴样本分位阈值以上”的年份。
+    该定义与主回归的滞后一期补贴口径保持一致。
+    """
+    positive_lagged = df.loc[df["SubsidyAmount_l1"].fillna(0) > 0, "SubsidyAmount_l1"].dropna()
+    if len(positive_lagged) < 500:
+        return None
+
+    threshold = float(positive_lagged.quantile(threshold_quantile))
+    event_flag = (df["SubsidyAmount_l1"] >= threshold) & (df["SubsidyAmount_l1"] > 0)
+    event_year = df.loc[event_flag, ["Symbol", "Year"]].groupby("Symbol")["Year"].min()
+    if event_year.empty:
+        return None
+
+    needed = ["Overpay", "Symbol", "Year"] + control_vars
+    work = df.dropna(subset=needed).copy()
+    work.attrs = {}
+    event_year_df = event_year.rename("event_year").reset_index()
+    work = work.merge(event_year_df, on="Symbol", how="left")
+    work["treated_firm"] = work["event_year"].notna().astype(int)
+    work["event_time"] = work["Year"] - work["event_year"]
+
+    event_terms = []
+    for k in range(-window, window + 1):
+        if k == -1:
+            continue
+        term = _event_term_name(k)
+        work[term] = ((work["treated_firm"] == 1) & (work["event_time"] == k)).astype(float)
+        event_terms.append(term)
+
+    sub = work.set_index(["Symbol", "Year"], drop=False)
+    x_cols = event_terms + control_vars
+    model = _fit_with_cluster_se(sub["Overpay"], sub[x_cols].astype(float))
+
+    row_data = []
+    for k in range(-window, window + 1):
+        if k == -1:
+            continue
+        term = _event_term_name(k)
+        coef = float(model.params.get(term, np.nan))
+        se = float(model.std_errors.get(term, np.nan))
+        row_data.append({
+            "event_time": int(k),
+            "term": term,
+            "coef": coef,
+            "se": se,
+            "t_value": float(model.tstats.get(term, np.nan)),
+            "p_value": float(model.pvalues.get(term, np.nan)),
+            "ci_lower": float(coef - 1.96 * se) if np.isfinite(coef) and np.isfinite(se) else np.nan,
+            "ci_upper": float(coef + 1.96 * se) if np.isfinite(coef) and np.isfinite(se) else np.nan,
+            "treated_obs_count": int(((work["treated_firm"] == 1) & (work["event_time"] == k)).sum()),
+        })
+
+    pre_terms = [_event_term_name(k) for k in range(-window, -1)]
+    post_terms = [_event_term_name(k) for k in range(0, window + 1)]
+    pretrend_test = _wald_zero_test(model, pre_terms)
+    post_test = _wald_zero_test(model, post_terms)
+
+    return {
+        "model": model,
+        "rows": pd.DataFrame(row_data),
+        "summary": {
+            "threshold_quantile": float(threshold_quantile),
+            "threshold_value": threshold,
+            "window": int(window),
+            "treated_firms": int(event_year.shape[0]),
+            "all_firms": int(work["Symbol"].nunique()),
+            "sample_size": int(len(sub)),
+            "n_clusters": int(work["Symbol"].nunique()),
+            "pretrend_p": float(pretrend_test["pval"]) if pretrend_test else np.nan,
+            "posttrend_p": float(post_test["pval"]) if post_test else np.nan,
+            "pretrend_stat": float(pretrend_test["stat"]) if pretrend_test else np.nan,
+            "posttrend_stat": float(post_test["stat"]) if post_test else np.nan,
+            "omitted_period": -1,
         },
     }
 
@@ -1559,11 +2093,13 @@ def _print_subsample_model2(label, fit_result, subsidy_col=BASE_SUBSIDY_LAG_COL)
 
 
 def _build_power_method_comparison(df, control_vars, power_diagnostics=None):
-    """比较 PCA/FA/熵值法三种 Power 构造在全样本中的中介结果。"""
+    """比较 FA 与 PCA 两种 Power 构造在全样本中的中介结果。"""
     power_diagnostics = power_diagnostics or {}
+    power_vars = power_diagnostics.get("power_vars", ["Dual", "Boardsize", "Insider", "Mgshder"])
     rows = []
     method_specs = [
         {"method": "FA", "role": "正文口径（经验性综合指标）", "power_col": "Power_FA", "diag_key": "fa"},
+        {"method": "PCA", "role": "对照口径（前两主成分加权综合得分）", "power_col": "Power_PCA", "diag_key": "pca"},
     ]
 
     for spec in method_specs:
@@ -1583,10 +2119,22 @@ def _build_power_method_comparison(df, control_vars, power_diagnostics=None):
         _augment_summary_with_bootstrap(
             fit_result,
             reps=MAIN_MEDIATION_BOOTSTRAP_REPS,
-            seed=_stable_seed_from_text(f"PowerMethod::{spec['method']}"),
+            seed=(
+                _stable_seed_from_text("全样本")
+                if spec["method"] == "FA"
+                else _stable_seed_from_text(f"PowerMethod::{spec['method']}")
+            ),
         )
         summary = fit_result["summary"]
         diag = power_diagnostics.get(spec["diag_key"], {})
+        diag_source = fit_result["unified_df"].dropna(subset=power_vars).copy()
+        if not diag_source.empty:
+            standardized = _standardize_power_inputs(diag_source, power_vars)
+            shared_diag = _calc_shared_factor_diagnostics(standardized, power_vars)
+            if spec["method"] == "FA":
+                diag = {**shared_diag, **_compute_fa_power(standardized, power_vars)}
+            else:
+                diag = {**shared_diag, **_compute_pca_power(standardized, power_vars)}
         rows.append({
             "method": spec["method"],
             "role": spec["role"],
@@ -1595,14 +2143,19 @@ def _build_power_method_comparison(df, control_vars, power_diagnostics=None):
             "n_clusters": summary["n_clusters"],
             "kmo": diag.get("kmo_overall", np.nan),
             "bartlett_p": diag.get("bartlett_p", np.nan),
-            "primary_variance_ratio": diag.get(
-                "variance_explained_ratio",
-                diag.get("explained_variance_ratio_pc1", np.nan),
+            "primary_variance_ratio": (
+                diag.get("variance_explained_ratio", np.nan)
+                if spec["method"] == "FA"
+                else diag.get("cum_explained_variance_pc2", np.nan)
             ),
             "coef_a": summary["coef_a"],
             "p_a": summary["p_a"],
             "coef_b": summary["coef_b"],
             "p_b": summary["p_b"],
+            "coef_c_prime": summary["coef_c_prime"],
+            "p_c_prime": summary["p_c_prime"],
+            "coef_c": summary["coef_c"],
+            "p_c": summary["p_c"],
             "sobel_p": summary["sobel_p"],
             "bootstrap_p": summary["bootstrap_p"],
             "bootstrap_ci_lower": summary["bootstrap_ci_lower"],
@@ -1667,28 +2220,59 @@ def run_regressions(df, power_diagnostics=None):
         include_fstat=True,
     )
 
-    # ---- 工具变量检验 ----
+    # ---- 内生性与选择偏差检验 ----
     print("\n" + "-" * 50)
-    print("工具变量检验: FE-2SLS (工具变量: 滞后一期同城市同年度其他企业平均补贴)")
+    print("工具变量与选择偏差检验")
     print("-" * 50)
-    iv_result = _fit_iv_with_fe(df, control_vars)
-    if iv_result is None:
-        raise RuntimeError("IV 样本量不足，无法完成 FE-2SLS。")
-    iv_model = iv_result["model"]
-    first_stage = iv_result["first_stage"]
-    print(iv_model.summary.tables[1])
-    print(
-        "第一阶段工具变量统计量: "
-        f"coef={first_stage['coef']:.4f}, "
-        f"Partial R²={first_stage['partial_r2']:.4f}, "
-        f"Partial F={first_stage['f_stat']:.2f}, "
-        f"p={_format_pvalue(first_stage['f_pval'])}"
-    )
-    print(
-        f"IV 回归样本量: {iv_result['sample_size']}，"
-        f"聚类数: {iv_result['n_clusters']}，"
-        f"年份固定效应: {iv_result['year_fe_count']} 个"
-    )
+    endogeneity_checks = _run_endogeneity_checks(df, control_vars)
+    iv_comparison = endogeneity_checks["iv_comparison"]
+    if iv_comparison.empty:
+        raise RuntimeError("IV 样本量不足，无法完成替代工具变量检验。")
+    print("IV 方案比较：")
+    print(iv_comparison.to_string(index=False))
+    heckman_result = endogeneity_checks.get("heckman_result")
+    if heckman_result is not None:
+        print(
+            "Heckman 两步法（正补助样本）: "
+            f"选择样本量={heckman_result['selection_sample_size']}, "
+            f"结果样本量={heckman_result['outcome_sample_size']}, "
+            f"排除变量={heckman_result['exclusion_col']} (p={_format_pvalue(heckman_result['exclusion_p'])}), "
+            f"IMR p={_format_pvalue(heckman_result['imr_p'])}, "
+            f"补贴系数={heckman_result['subsidy_coef']:.4f} (p={_format_pvalue(heckman_result['subsidy_p'])})"
+        )
+
+    print("\n" + "-" * 50)
+    print("未来补贴安慰剂检验")
+    print("-" * 50)
+    placebo_df = _run_placebo_checks(df, control_vars)
+    if placebo_df.empty:
+        print("安慰剂样本量不足，未能完成估计。")
+    else:
+        print(placebo_df.to_string(index=False))
+
+    print("\n" + "-" * 50)
+    print("首次大额补贴事件研究")
+    print("-" * 50)
+    event_study_result = _run_event_study(df, control_vars)
+    if event_study_result is None:
+        print("事件研究样本量不足，未能完成估计。")
+    else:
+        event_summary = event_study_result["summary"]
+        print(
+            "事件定义: 首次出现上一年补贴金额进入正补贴样本前"
+            f"{int(EVENT_STUDY_THRESHOLD_QUANTILE * 100)}%分位以上；"
+            f"阈值={event_summary['threshold_value']:.2f}"
+        )
+        print(
+            f"事件窗口: [-{event_summary['window']}, {event_summary['window']}], "
+            f"treated firms={event_summary['treated_firms']}, "
+            f"N={event_summary['sample_size']}, 聚类={event_summary['n_clusters']}"
+        )
+        print(
+            f"预趋势联合检验 p={_format_pvalue(event_summary['pretrend_p'])}; "
+            f"事后系数联合检验 p={_format_pvalue(event_summary['posttrend_p'])}"
+        )
+        print(event_study_result["rows"].to_string(index=False))
 
     print(f"\n模型3-5统一样本量: N = {len(df_unified)}")
     print(f"  聚类数（公司数）: {df_unified['Symbol'].nunique()}")
@@ -1731,7 +2315,10 @@ def run_regressions(df, power_diagnostics=None):
         "model4": model4,
         "model5": model5,
         "main_result": main_result,
-        "iv_result": iv_result,
+        "iv_result": endogeneity_checks["iv_result"],
+        "iv_checks": endogeneity_checks,
+        "placebo_df": placebo_df,
+        "event_study_result": event_study_result,
         "summary": fit_result["summary"],
         "fit_result": fit_result,
         "method_comparison": method_comparison,
@@ -1991,6 +2578,42 @@ def robustness_checks(df):
     return pd.DataFrame(rows)
 
 
+def _save_event_study_plot(event_study_result, output_dir):
+    """保存事件研究系数图。"""
+    if event_study_result is None:
+        return None
+    rows = event_study_result.get("rows")
+    if rows is None or rows.empty:
+        return None
+
+    plot_df = rows.sort_values("event_time").copy()
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    ax.errorbar(
+        plot_df["event_time"],
+        plot_df["coef"],
+        yerr=1.96 * plot_df["se"],
+        fmt="o-",
+        color="#1f4e79",
+        ecolor="#7aa6c2",
+        elinewidth=1.5,
+        capsize=4,
+        markersize=5,
+    )
+    ax.axhline(0, color="#666666", linestyle="--", linewidth=1)
+    ax.axvline(-0.5, color="#999999", linestyle=":", linewidth=1)
+    ax.set_xlabel("相对首次大额补贴暴露年份")
+    ax.set_ylabel("对 Overpay 的系数")
+    ax.set_title("首次大额补贴事件研究")
+    ax.set_xticks(plot_df["event_time"].tolist())
+    ax.grid(axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+
+    output_path = os.path.join(output_dir, "event_study_plot.png")
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
 # ============================================================
 # 数据集构建与结果落盘
 # ============================================================
@@ -2014,7 +2637,7 @@ def build_analysis_dataset(data_dir):
         _sample_stage_row(
             "可用于构造 Power 的样本",
             df.dropna(subset=["Power_FA"]).copy(),
-            note="五个管理层权力底层指标同时完整，采用 FA 口径构造 Power",
+            note="四个管理层权力底层指标同时完整，采用 FA 口径构造 Power",
         )
     )
     df.attrs["sample_screening_summary"] = sample_summary
@@ -2051,8 +2674,6 @@ def save_structured_outputs(
     else:
         pca_diagnostics = power_diagnostics.get("pca", {})
         fa_diagnostics = power_diagnostics.get("fa", {})
-    entropy_diagnostics = power_diagnostics.get("entropy", {})
-
     pca_summary = pd.DataFrame([{
         "样本量": pca_diagnostics["n_obs"],
         "KMO": pca_diagnostics["kmo_overall"],
@@ -2060,6 +2681,7 @@ def save_structured_outputs(
         "Bartlett_df": pca_diagnostics["bartlett_df"],
         "Bartlett_p": pca_diagnostics["bartlett_p"],
         "PC1方差贡献率": pca_diagnostics["explained_variance_ratio_pc1"],
+        "PC2方差贡献率": pca_diagnostics.get("explained_variance_ratio_pc2", np.nan),
         "前两主成分累计方差贡献率": pca_diagnostics["cum_explained_variance_pc2"],
         "前三主成分累计方差贡献率": pca_diagnostics["cum_explained_variance_pc3"],
     }])
@@ -2069,7 +2691,9 @@ def save_structured_outputs(
         {
             "变量": var,
             "KMO": pca_diagnostics["kmo_per_var"][var],
-            "载荷": pca_diagnostics["loadings"][var],
+            "PC1载荷": pca_diagnostics["pc1_loadings"][var],
+            "PC2载荷": pca_diagnostics["pc2_loadings"][var],
+            "综合载荷": pca_diagnostics["loadings"][var],
         }
         for var in power_vars
     ])
@@ -2079,13 +2703,15 @@ def save_structured_outputs(
         {
             "变量": var,
             "KMO": fa_diagnostics["kmo_per_var"][var],
-            "FA载荷": fa_diagnostics["loadings"][var],
+            "FA1载荷": fa_diagnostics["fa1_loadings"][var],
+            "FA2载荷": fa_diagnostics["fa2_loadings"][var],
+            "综合载荷": fa_diagnostics["loadings"][var],
             "共同度": fa_diagnostics["communalities"][var],
             "特殊方差": fa_diagnostics["uniqueness"][var],
-            "因子得分权重": fa_diagnostics["score_weights"][var],
+            "综合得分权重": fa_diagnostics["score_weights"][var],
             "KMO总体": fa_diagnostics["kmo_overall"],
             "Bartlett_p": fa_diagnostics["bartlett_p"],
-            "单因子方差解释率": fa_diagnostics["variance_explained_ratio"],
+            "前两因子累计方差解释率": fa_diagnostics["variance_explained_ratio"],
         }
         for var in power_vars
     ])
@@ -2157,6 +2783,11 @@ def save_structured_outputs(
     )
 
     iv_result = main_regression.get("iv_result", {})
+    iv_checks = main_regression.get("iv_checks", {})
+    iv_comparison = iv_checks.get("iv_comparison", pd.DataFrame())
+    heckman_result = iv_checks.get("heckman_result", {})
+    placebo_df = main_regression.get("placebo_df", pd.DataFrame())
+    event_study_result = main_regression.get("event_study_result")
     iv_model = iv_result.get("model")
     first_stage = iv_result.get("first_stage", {})
     model2 = main_regression.get("model2")
@@ -2177,33 +2808,6 @@ def save_structured_outputs(
             "n": int(main_result.get("sample_size", np.nan)),
             "r2": float(model2.rsquared),
             "note": "公司固定效应+年份固定效应+公司层面聚类稳健标准误",
-        })
-    if iv_model is not None:
-        causal_rows.append({
-            "category": "IV-第一阶段",
-            "model": "FE-2SLS_FS",
-            "key_var": first_stage.get("instrument", "IV_lnSubsidy_l1"),
-            "coef": float(first_stage.get("coef", np.nan)),
-            "se": float(first_stage.get("se", np.nan)),
-            "p": float(first_stage.get("p", np.nan)),
-            "n": int(iv_result.get("sample_size", np.nan)),
-            "r2": float(first_stage.get("rsquared", np.nan)),
-            "note": (
-                f"公司固定效应经公司内去均值吸收，年份固定效应已控制；"
-                f"Partial R²={first_stage.get('partial_r2', np.nan):.4f}; "
-                f"Partial F={first_stage.get('f_stat', np.nan):.2f}"
-            ),
-        })
-        causal_rows.append({
-            "category": "IV-第二阶段",
-            "model": "FE-2SLS_SS",
-            "key_var": "lnSubsidy_l1",
-            "coef": float(iv_model.params.get("lnSubsidy_l1", np.nan)),
-            "se": float(iv_model.std_errors.get("lnSubsidy_l1", np.nan)),
-            "p": float(iv_model.pvalues.get("lnSubsidy_l1", np.nan)),
-            "n": int(iv_result.get("sample_size", np.nan)),
-            "r2": float(iv_model.rsquared),
-            "note": "公司固定效应经公司内去均值吸收，年份固定效应已控制",
         })
     if model4 is not None:
         causal_rows.append({
@@ -2273,6 +2877,39 @@ def save_structured_outputs(
         index=False,
     )
 
+    if isinstance(iv_comparison, pd.DataFrame) and not iv_comparison.empty:
+        iv_comparison.to_csv(
+            os.path.join(output_dir, "iv_comparison_results.csv"),
+            index=False,
+        )
+    heckman_export = (
+        {k: v for k, v in heckman_result.items() if k not in {"selection_model", "outcome_model"}}
+        if isinstance(heckman_result, dict) and heckman_result
+        else {}
+    )
+    if heckman_export:
+        pd.DataFrame([heckman_export]).to_csv(
+            os.path.join(output_dir, "heckman_results.csv"),
+            index=False,
+        )
+    if isinstance(placebo_df, pd.DataFrame) and not placebo_df.empty:
+        placebo_df.to_csv(
+            os.path.join(output_dir, "placebo_results.csv"),
+            index=False,
+        )
+    if event_study_result is not None:
+        event_rows = event_study_result.get("rows", pd.DataFrame())
+        event_summary = event_study_result.get("summary", {})
+        if isinstance(event_rows, pd.DataFrame) and not event_rows.empty:
+            event_rows.to_csv(
+                os.path.join(output_dir, "event_study_results.csv"),
+                index=False,
+            )
+        if event_summary:
+            with open(os.path.join(output_dir, "event_study_summary.json"), "w", encoding="utf-8") as f:
+                json.dump(event_summary, f, ensure_ascii=False, indent=2)
+        _save_event_study_plot(event_study_result, output_dir)
+
     diagnostics_summary = {
         "stage1": {
             "sample_size": int(len(stage1_fit["df_model1"])),
@@ -2295,6 +2932,28 @@ def save_structured_outputs(
             "second_stage_coef": float(iv_model.params.get("lnSubsidy_l1", np.nan)) if iv_model is not None else np.nan,
             "second_stage_t": float(iv_model.tstats.get("lnSubsidy_l1", np.nan)) if iv_model is not None else np.nan,
         },
+        "iv_benchmark": (
+            iv_comparison.loc[iv_comparison["role"] == "benchmark"].iloc[0].to_dict()
+            if isinstance(iv_comparison, pd.DataFrame) and not iv_comparison.empty and (iv_comparison["role"] == "benchmark").any()
+            else {}
+        ),
+        "iv_simple": (
+            iv_comparison.loc[iv_comparison["role"] == "simple"].iloc[0].to_dict()
+            if isinstance(iv_comparison, pd.DataFrame) and not iv_comparison.empty and (iv_comparison["role"] == "simple").any()
+            else {}
+        ),
+        "iv_refined": (
+            iv_comparison.loc[iv_comparison["role"] == "refined"].iloc[0].to_dict()
+            if isinstance(iv_comparison, pd.DataFrame) and not iv_comparison.empty and (iv_comparison["role"] == "refined").any()
+            else {}
+        ),
+        "heckman": heckman_export,
+        "placebo": (
+            placebo_df.set_index("check_item").to_dict(orient="index")
+            if isinstance(placebo_df, pd.DataFrame) and not placebo_df.empty
+            else {}
+        ),
+        "event_study": event_study_result.get("summary", {}) if event_study_result else {},
         "vif": {
             "max": float(vif_df["VIF"].max()),
             "mean": float(vif_df["VIF"].mean()),

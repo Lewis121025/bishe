@@ -1,0 +1,14 @@
+{
+  "threshold_quantile": 0.75,
+  "threshold_value": 34978824.08,
+  "window": 3,
+  "treated_firms": 2237,
+  "all_firms": 5124,
+  "sample_size": 52805,
+  "n_clusters": 5124,
+  "pretrend_p": 0.5987181310033783,
+  "posttrend_p": 0.060038729114163636,
+  "pretrend_stat": 1.0259287151103649,
+  "posttrend_stat": 9.042792406958156,
+  "omitted_period": -1
+}

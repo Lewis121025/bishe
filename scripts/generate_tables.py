@@ -159,26 +159,41 @@ def build_mediation_table(df):
 
 
 def build_causal_table(main_results):
-    """表4 FE-2SLS 因果识别结果。"""
-    iv_result = main_results["iv_result"]
-    second_stage = iv_result["model"]
-    first_stage = iv_result["first_stage"]
+    """表4 工具变量与 Heckman 结果。"""
+    iv_checks = main_results.get("iv_checks", {})
+    iv_df = iv_checks.get("iv_comparison", pd.DataFrame()).copy()
+    heckman = iv_checks.get("heckman_result", {})
 
     lines = []
     lines.append("")
     lines.append("=" * 90)
-    lines.append("表4  工具变量（FE-2SLS）估计结果")
+    lines.append("表4  工具变量与 Heckman 两阶段结果")
     lines.append("=" * 90)
-    lines.append(f"{'阶段':<12} {'因变量':<18} {'系数':<16} {'统计量':<22} {'N':<10}")
+    lines.append(f"{'识别方案':<16} {'工具/排除变量':<32} {'一阶段统计量':<18} {'二阶段补贴系数':<18} {'N':<10}")
     lines.append("-" * 90)
-    rows = [
-        ("第一阶段", BASE_SUBSIDY_LAG_COL, f"{format_coef(first_stage['coef'], first_stage['f_pval'])}", f"Partial F = {first_stage['f_stat']:.2f}", f"{iv_result['sample_size']}"),
-        ("第二阶段", "Overpay", f"{format_coef(second_stage.params[BASE_SUBSIDY_LAG_COL], second_stage.pvalues[BASE_SUBSIDY_LAG_COL])}", f"t = {_get_tstat(second_stage, BASE_SUBSIDY_LAG_COL):.4f}", f"{iv_result['sample_size']}"),
-    ]
-    for stage, dep_var, coef, stat, nobs in rows:
-        lines.append(f"{stage:<12} {dep_var:<18} {coef:<16} {stat:<22} {nobs:<10}")
+    if not iv_df.empty:
+        for _, row in iv_df.iterrows():
+            second_coef = format_coef(row["second_stage_coef"], row["second_stage_p"])
+            if pd.notna(row.get("overid_p", np.nan)):
+                stat_text = (
+                    f"F={row['partial_f']:.2f}; "
+                    f"OverID p={row['overid_p']:.3f}"
+                )
+            else:
+                stat_text = f"F={row['partial_f']:.2f}"
+            lines.append(
+                f"{row['spec_name']:<16} {row['instrument_desc']:<32} {stat_text:<18} "
+                f"{second_coef} (t={row['second_stage_t']:.4f})".ljust(18) + f" {int(row['sample_size']):<10}"
+            )
+    if heckman:
+        heckman_coef = format_coef(heckman["subsidy_coef"], heckman["subsidy_p"])
+        stat_text = f"IMR p={heckman['imr_p']:.4f}"
+        lines.append(
+            f"{'Heckman两步法':<16} {heckman['exclusion_col']:<32} {stat_text:<18} "
+            f"{heckman_coef} (t={heckman['subsidy_t']:.4f})".ljust(18) + f" {heckman['outcome_sample_size']:<10}"
+        )
     lines.append("=" * 90)
-    lines.append(f"注：第一阶段报告工具变量系数；Partial R² 为 {first_stage['partial_r2']:.4f}，说明工具变量具有统计相关性但解释力度有限。标准误为公司层面聚类稳健标准误。")
+    lines.append("注：前三行为公司固定效应 + 年份固定效应的 FE-2SLS 比较。基准工具变量为滞后一期同城同年其他企业平均补助；简单替代工具变量为滞后一期同行业同年其他企业平均补助；精炼双工具变量为“同行业同年排除本省平均补助”与“同省同行业同年排除本市平均补助”。Heckman 两步法仅用于 `lnSubsidy_pos_l1` 的正补助样本选择校正，第二阶段仍控制 Roa、Lever、Top1 以及公司和年份固定效应。")
     return "\n".join(lines)
 
 
@@ -237,7 +252,7 @@ def build_power_method_comparison_table(main_results):
             f"{row['method']:<12} {row['role']:<18} {coef_b:<18} {ci:<34} {row['mediation_type']}"
         )
     lines.append("=" * 110)
-    lines.append("注：FA 为正文采用的经验性综合口径，PCA 与熵值法仅作对照。bootstrap 95%CI 为公司层面 cluster bootstrap（300 次）得到的 95% 置信区间。")
+    lines.append("注：FA 为正文采用的经验性综合口径，PCA 为删除 Tenure 后以前两个主成分加权形成的对照口径。bootstrap 95%CI 为公司层面 cluster bootstrap（300 次）得到的 95% 置信区间。")
     return "\n".join(lines)
 
 
