@@ -9,6 +9,7 @@
 - `descriptive_statistics.csv`：描述性统计
 - `correlation_matrix.csv`：相关性分析
 - `vif_results.csv`：多重共线性检验
+- `diagnostics_summary.json`：正文会引用的模型诊断值汇总（如模型1调整后R²、模型2 F统计量、VIF 最大值/均值）
 - `causal_results.csv`：固定效应、滞后项与工具变量相关结果
 - `main_mediation_summary.csv`：FA 口径管理层权力中介效应汇总
 - `robustness_results.csv`：稳健性检验结果
@@ -35,9 +36,7 @@
 - `fig6_kmeans_clusters.png`、`fig7_cluster_heatmap.png`：聚类分析图
 - `fig8_model_comparison.png`：模型对比图
 
-## 辅助性目录
+## 说明
 
-- `mineru_正文修改/`：PDF 转 Markdown 过程文件，属于排版处理辅助产物
-- `pdf_page_renders/`：PDF 页面渲染缓存
-
-以上两个目录不影响论文结论复现，主要用于排版和校对过程留存。
+- 本目录默认仅保留与当前正文口径一致的结果文件和图形文件。
+- 旧值整理稿、PDF 转 Markdown 中间文件和其他排版缓存不再保留，以避免误用过时结果。

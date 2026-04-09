@@ -14,13 +14,16 @@
   模型5（中介路径b与直接效应）: Overpay = α₀ + α₁·lnSubsidy + α₂·Power + α₃·Roa + α₄·Lever + α₅·Top1 + μᵢ + λₜ + ε
 """
 
+import json
 import os
+import re
 import warnings
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from scipy import stats
 from statsmodels.multivariate.factor import Factor
+from statsmodels.stats.diagnostic import het_breuschpagan
 from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from sklearn.preprocessing import StandardScaler
@@ -53,6 +56,11 @@ BASE_SUBSIDY_COL = "lnSubsidy"
 BASE_SUBSIDY_LAG_COL = "lnSubsidy_l1"
 ALT_SUBSIDY_COL = "lnSubsidy_pos"
 ALT_SUBSIDY_LAG_COL = "lnSubsidy_pos_l1"
+SPECIAL_TREATMENT_PREFIX_PATTERN = re.compile(
+    r"^(?:[A-Z]+)?(?:S\*ST|\*ST|SST|PT|ST)",
+    re.IGNORECASE,
+)
+SPECIAL_TREATMENT_SUFFIX_PATTERN = re.compile(r"(?:退市整理|退市|退)$", re.IGNORECASE)
 
 
 def _assert_not_lfs_pointer(file_path):
@@ -85,6 +93,29 @@ def _format_pvalue(pvalue):
     if pvalue < 0.001:
         return "<0.001"
     return f"{pvalue:.4f}"
+
+
+def _is_special_treatment_name(short_name):
+    """按公司简称标签识别 ST/*ST/S*ST/SST/PT/退市整理期样本。"""
+    if pd.isna(short_name):
+        return False
+    normalized = re.sub(r"\s+", "", str(short_name).strip())
+    if not normalized:
+        return False
+    return bool(
+        SPECIAL_TREATMENT_PREFIX_PATTERN.search(normalized)
+        or SPECIAL_TREATMENT_SUFFIX_PATTERN.search(normalized)
+    )
+
+
+def _sample_stage_row(stage, df_subset, note=""):
+    """统一记录样本筛选各阶段的观测数与公司数。"""
+    return {
+        "stage": stage,
+        "observations": int(len(df_subset)),
+        "unique_companies": int(df_subset["Symbol"].nunique()) if "Symbol" in df_subset.columns else np.nan,
+        "note": note,
+    }
 
 
 def _classify_pvalue_signal(pvalue):
@@ -283,7 +314,8 @@ def load_and_clean_data(data_dir):
     df_gov["Year"] = pd.to_datetime(df_gov["Enddate"]).dt.year
     # 去重，保留每个公司每年最后一条记录
     df_gov = df_gov.sort_values("Enddate").groupby(["Symbol", "Year"]).last().reset_index()
-    df_gov = df_gov[["Symbol", "Year", "ConcurrentPosition", "Mngmhldn",
+    df_gov = df_gov.rename(columns={"ShortName": "GovShortName"})
+    df_gov = df_gov[["Symbol", "Year", "GovShortName", "ConcurrentPosition", "Mngmhldn",
                       "Boardsize", "IndDirectorRatio"]]
     print(f"  {len(df_gov)} 行")
 
@@ -330,7 +362,11 @@ def load_and_clean_data(data_dir):
     df_holder["Symbol"] = df_holder["Symbol"].apply(lambda x: f"{int(x):06d}")
     df_holder["Year"] = pd.to_datetime(df_holder["EndDate"]).dt.year
     df_holder = df_holder.sort_values("EndDate").groupby(["Symbol", "Year"]).last().reset_index()
-    df_holder = df_holder[["Symbol", "Year", "LargestHolderRate", "ActualControllerNatureID"]]
+    if "ShortName" in df_holder.columns:
+        df_holder = df_holder.rename(columns={"ShortName": "HolderShortName"})
+        df_holder = df_holder[["Symbol", "Year", "HolderShortName", "LargestHolderRate", "ActualControllerNatureID"]]
+    else:
+        df_holder = df_holder[["Symbol", "Year", "LargestHolderRate", "ActualControllerNatureID"]]
     print(f"  {len(df_holder)} 行")
 
     # --- 7. 总经理任期年限 ---
@@ -361,7 +397,12 @@ def load_and_clean_data(data_dir):
     # 排除"合计"行，避免重复加总
     df_sub = df_sub[df_sub["Fn05601"] != "合计"]
     # 汇总每个公司每年的所有政府补助金额
-    df_sub_agg = df_sub.groupby(["Symbol", "Year"])["SubsidyAmount"].sum().reset_index()
+    df_sub_agg = (
+        df_sub.sort_values("Accper")
+        .groupby(["Symbol", "Year"], as_index=False)
+        .agg({"SubsidyAmount": "sum", "ShortName": "last"})
+        .rename(columns={"ShortName": "SubsidyShortName"})
+    )
     print(f"  {len(df_sub_agg)} 行 (按公司-年汇总后)")
 
     # ============================
@@ -378,6 +419,20 @@ def load_and_clean_data(data_dir):
         merged = pd.merge(merged, df_right, on=["Symbol", "Year"], how="left")
         print(f"  + {name}: {before} → {len(merged)} 行")
 
+    short_name_cols = [col for col in ["GovShortName", "HolderShortName", "SubsidyShortName"] if col in merged.columns]
+    if short_name_cols:
+        for col in short_name_cols:
+            merged[col] = merged[col].astype("string").str.strip()
+        merged["ShortName"] = merged[short_name_cols].bfill(axis=1).iloc[:, 0]
+        merged["IsSpecialTreatment"] = merged[short_name_cols].apply(
+            lambda row: any(_is_special_treatment_name(value) for value in row),
+            axis=1,
+        )
+    else:
+        merged["ShortName"] = pd.Series(pd.NA, index=merged.index, dtype="string")
+        merged["IsSpecialTreatment"] = False
+
+    print(f"  特殊处理简称标签样本（按简称识别）: {int(merged['IsSpecialTreatment'].sum())} 行")
     print(f"\n合并后总行数: {len(merged)}")
     return merged
 
@@ -574,15 +629,44 @@ def filter_and_describe(df):
                  "Tenure", "Boardsize"]
 
     print(f"\n筛选前总样本: {len(df)} 行")
+    sample_summary = [_sample_stage_row("原始公司-年观测", df, note="合并各类原始表后的面板样本")]
 
     # 剔除金融行业 (IndustryCode1 以 J 开头)
     df = df[~df["IndustryCode1"].str.startswith("J", na=False)].copy()
     print(f"剔除金融行业后: {len(df)} 行")
+    sample_summary.append(_sample_stage_row("剔除金融行业后", df, note="按行业代码首字母 J 识别金融行业"))
+
+    # 剔除 ST/*ST/S*ST/SST/PT/退市整理期样本（按公司简称标签识别）
+    special_treatment_mask = df["IsSpecialTreatment"].fillna(False).astype(bool)
+    removed_special_rows = int(special_treatment_mask.sum())
+    removed_special_companies = int(df.loc[special_treatment_mask, "Symbol"].nunique())
+    df = df.loc[~special_treatment_mask].copy()
+    print(
+        "剔除 ST/*ST/PT/退市整理期样本后: "
+        f"{len(df)} 行（剔除 {removed_special_rows} 行、{removed_special_companies} 家公司）"
+    )
+    sample_summary.append(
+        _sample_stage_row(
+            "剔除特殊处理样本后",
+            df,
+            note="按公司简称标签剔除 ST/*ST/S*ST/SST/PT/退市整理期样本",
+        )
+    )
 
     # 要求核心变量非空
     key_vars = ["lnCEOpay", BASE_SUBSIDY_COL, "Roa", "Lever", "Top1", "Zone", "Industry"]
     df_clean = df.dropna(subset=key_vars).copy()
     print(f"剔除关键变量缺失后: {len(df_clean)} 行")
+    sample_summary.append(
+        _sample_stage_row(
+            "关键变量完整样本",
+            df_clean,
+            note="要求 lnCEOpay、lnSubsidy、Roa、Lever、Top1、Zone、Industry 同时完整",
+        )
+    )
+    short_name_missing = int(df_clean["ShortName"].isna().sum()) if "ShortName" in df_clean.columns else 0
+    if short_name_missing > 0:
+        print(f"  提示：关键变量完整样本中仍有 {short_name_missing} 行简称缺失，无法进一步按简称校验。")
 
     # 原始薪酬数据已在源数据阶段缩尾，此处不再对 lnCEOpay / Overpay 二次缩尾
     print("\n对除薪酬外的连续变量进行 1%-99% Winsorize 缩尾处理...")
@@ -635,6 +719,7 @@ def filter_and_describe(df):
     except Exception as e:
         print(f"VIF 计算出错: {e}")
 
+    df_clean.attrs["sample_screening_summary"] = sample_summary
     return df_clean
 
 
@@ -673,6 +758,106 @@ def _fit_expectation_salary_model(df):
     }
 
 
+def _compute_bp_test(stage1_model):
+    """基于模型1残差执行 Breusch-Pagan 异方差检验。"""
+    lm_stat, lm_pvalue, f_stat, f_pvalue = het_breuschpagan(
+        stage1_model.resid,
+        stage1_model.model.exog,
+    )
+    return {
+        "lm_stat": float(lm_stat),
+        "lm_pvalue": float(lm_pvalue),
+        "f_stat": float(f_stat),
+        "f_pvalue": float(f_pvalue),
+    }
+
+
+def _compute_wooldridge_serial_test(
+    df,
+    dep_var="Overpay",
+    core_vars=None,
+    entity_col="Symbol",
+    time_col="Year",
+):
+    """按 Wooldridge(2002)/Drukker(2003) 思路近似执行面板序列相关检验。"""
+    if core_vars is None:
+        core_vars = [BASE_SUBSIDY_LAG_COL] + FE_CONTROL_VARS
+
+    needed = [dep_var, entity_col, time_col] + list(core_vars)
+    panel = (
+        df.dropna(subset=needed)
+        .copy()
+        .sort_values([entity_col, time_col])
+    )
+    if panel.empty:
+        return {
+            "rho": np.nan,
+            "se": np.nan,
+            "t_stat": np.nan,
+            "pvalue": np.nan,
+            "sample_size": 0,
+            "n_clusters": 0,
+        }
+
+    panel["year_gap"] = panel.groupby(entity_col)[time_col].diff()
+    diff_cols = []
+    for col in [dep_var] + list(core_vars):
+        prev = panel.groupby(entity_col)[col].shift(1)
+        diff_col = f"d_{col}"
+        panel[diff_col] = panel[col] - prev
+        panel.loc[panel["year_gap"] != 1, diff_col] = np.nan
+        diff_cols.append(diff_col)
+
+    fd_panel = panel.dropna(subset=diff_cols).copy()
+    if len(fd_panel) < 100:
+        return {
+            "rho": np.nan,
+            "se": np.nan,
+            "t_stat": np.nan,
+            "pvalue": np.nan,
+            "sample_size": int(len(fd_panel)),
+            "n_clusters": int(fd_panel[entity_col].nunique()) if not fd_panel.empty else 0,
+        }
+
+    fd_y = fd_panel[f"d_{dep_var}"]
+    fd_x = fd_panel[[f"d_{col}" for col in core_vars]]
+    fd_model = sm.OLS(fd_y, fd_x).fit()
+
+    fd_panel["resid_fd"] = fd_model.resid
+    fd_panel["lag_resid_fd"] = fd_panel.groupby(entity_col)["resid_fd"].shift(1)
+    fd_panel["lag_year_gap"] = fd_panel.groupby(entity_col)[time_col].diff()
+    fd_panel.loc[fd_panel["lag_year_gap"] != 1, "lag_resid_fd"] = np.nan
+
+    aux = fd_panel.dropna(subset=["resid_fd", "lag_resid_fd"]).copy()
+    if len(aux) < 100:
+        return {
+            "rho": np.nan,
+            "se": np.nan,
+            "t_stat": np.nan,
+            "pvalue": np.nan,
+            "sample_size": int(len(aux)),
+            "n_clusters": int(aux[entity_col].nunique()) if not aux.empty else 0,
+        }
+
+    aux_model = sm.OLS(
+        aux["resid_fd"],
+        aux[["lag_resid_fd"]],
+    ).fit(cov_type="cluster", cov_kwds={"groups": aux[entity_col]})
+
+    rho = float(aux_model.params["lag_resid_fd"])
+    se = float(aux_model.bse["lag_resid_fd"])
+    t_stat = float((rho + 0.5) / se)
+    pvalue = float(2 * (1 - stats.norm.cdf(abs(t_stat))))
+    return {
+        "rho": rho,
+        "se": se,
+        "t_stat": t_stat,
+        "pvalue": pvalue,
+        "sample_size": int(len(aux)),
+        "n_clusters": int(aux[entity_col].nunique()),
+    }
+
+
 def _compute_descriptive_statistics(df):
     """按正文展示口径计算描述性统计。"""
     desc_vars_map = [
@@ -683,7 +868,7 @@ def _compute_descriptive_statistics(df):
         ("lnSale", "企业规模(lnSale)"),
         ("IA", "无形资产占比(IA)"),
         ("Overpay", "超额薪酬(Overpay)"),
-        ("Power", "管理层权力(Power, FA)"),
+        ("Power", "管理层权力(Power, FA口径)"),
         ("Roa", "业绩(Roa)"),
         ("Lever", "财务杠杆"),
         ("Top1", "第一大股东持股比例"),
@@ -777,7 +962,7 @@ def compute_overpay(df):
 
 
 # ============================================================
-# 第五部分：管理层权力 Power（FA 修订后主测度，熵值法稳健性替代，PCA 原始方案对照）
+# 第五部分：管理层权力 Power（FA 经验性综合口径，熵值法与 PCA 为对照）
 # ============================================================
 
 def _calc_shared_factor_diagnostics(df_complete, power_vars):
@@ -915,12 +1100,12 @@ def _compute_entropy_power(df_complete, power_vars):
 def compute_power(df, return_diagnostics=False):
     """
     管理层权力构造：
-      1. FA（因子分析）为修订后主测度
-      2. 熵值法为稳健性替代
-      3. PCA 保留为上一版原始方案对照，说明单一主成分代表性有限
+      1. FA（因子分析）作为正文采用的经验性综合口径
+      2. 熵值法作为对照口径
+      3. PCA 作为对照口径，用于说明单一主成分代表性有限
     """
     print("\n" + "=" * 70)
-    print("第五部分：管理层权力综合指标（FA修订后主测度，熵值法稳健性替代，PCA原始方案对照）")
+    print("第五部分：管理层权力综合指标（FA经验性综合口径，熵值法与PCA为对照）")
     print("=" * 70)
 
     power_vars = ["Tenure", "Dual", "Boardsize", "Insider", "Mgshder"]
@@ -973,10 +1158,10 @@ def compute_power(df, return_diagnostics=False):
         f"df = {shared_diag['bartlett_df']}, p = {_format_pvalue(shared_diag['bartlett_p'])}"
     )
     print(f"\n  PCA 第一主成分方差贡献率 = {pca_result['explained_variance_ratio_pc1']:.4f}")
-    print("  解释：PCA 仅显示存在基本共同性，但单一主成分代表性有限，保留为上一版原始方案对照。")
+    print("  解释：PCA 仅显示存在基本共同性，但单一主成分代表性有限，因此仅作对照。")
     print(f"\n  FA 单因子方差解释率 = {fa_result['variance_explained_ratio']:.4f}")
     print(f"  FA 平均共同度 = {diagnostics['fa']['average_communality']:.4f}")
-    print("  解释：修订版以 FA 作为 Power 主测度，并以熵值法作为稳健性替代。")
+    print("  解释：FA 仅作为正文采用的经验性综合口径，需结合较低 KMO 与有限方差解释率审慎解读。")
 
     score_df = pd.DataFrame({
         "Symbol": df_power["Symbol"].to_numpy(),
@@ -990,7 +1175,7 @@ def compute_power(df, return_diagnostics=False):
     df = df.merge(score_df, on=["Symbol", "Year"], how="left")
     df.attrs["power_diagnostics"] = diagnostics
 
-    print(f"\n修订后主测度 Power（FA）描述:")
+    print(f"\nPower（FA口径）描述:")
     print(df["Power"].describe().to_string())
 
     return (df, diagnostics) if return_diagnostics else df
@@ -1378,7 +1563,7 @@ def _build_power_method_comparison(df, control_vars, power_diagnostics=None):
     power_diagnostics = power_diagnostics or {}
     rows = []
     method_specs = [
-        {"method": "FA", "role": "修订后主测度", "power_col": "Power_FA", "diag_key": "fa"},
+        {"method": "FA", "role": "正文口径（经验性综合指标）", "power_col": "Power_FA", "diag_key": "fa"},
     ]
 
     for spec in method_specs:
@@ -1594,9 +1779,10 @@ def heterogeneity_analysis(df):
 
 def mechanism_analysis(df):
     """
-    异质性检验：
+    异质性分析：
     1) 管制行业 vs 非管制行业
     2) 央企 vs 地方国企（仅在可识别国有样本中）
+    所有分组仅重复估计主回归模型2。
     """
     print("\n" + "=" * 70)
     print("第八部分：异质性分析 — 行业管制与央地国企")
@@ -1814,8 +2000,24 @@ def build_analysis_dataset(data_dir):
     df = load_and_clean_data(data_dir)
     df = construct_variables(df)
     df = filter_and_describe(df)
+    sample_summary = list(df.attrs.get("sample_screening_summary", []))
     df = compute_overpay(df)
+    sample_summary.append(
+        _sample_stage_row(
+            "期望薪酬模型完整案例",
+            df.dropna(subset=["Overpay"]).copy(),
+            note="模型1完整案例，Overpay 为期望薪酬模型残差",
+        )
+    )
     df, power_diagnostics = compute_power(df, return_diagnostics=True)
+    sample_summary.append(
+        _sample_stage_row(
+            "可用于构造 Power 的样本",
+            df.dropna(subset=["Power_FA"]).copy(),
+            note="五个管理层权力底层指标同时完整，采用 FA 口径构造 Power",
+        )
+    )
+    df.attrs["sample_screening_summary"] = sample_summary
     return df, power_diagnostics
 
 
@@ -1900,6 +2102,8 @@ def save_structured_outputs(
 
     stage1_fit = _fit_expectation_salary_model(analysis_df)
     stage1_model = stage1_fit["model"]
+    bp_test = _compute_bp_test(stage1_model)
+    wooldridge_test = _compute_wooldridge_serial_test(analysis_df)
     stage1_rows = []
     for var in stage1_fit["model1_vars"]:
         stage1_rows.append({
@@ -1917,6 +2121,28 @@ def save_structured_outputs(
         os.path.join(output_dir, "stage1_results.csv"),
         index=False,
     )
+
+    sample_summary = list(analysis_df.attrs.get("sample_screening_summary", []))
+    sample_summary.append(
+        _sample_stage_row(
+            "模型2主回归样本",
+            analysis_df.dropna(subset=[BASE_SUBSIDY_LAG_COL, "Overpay"] + FE_CONTROL_VARS + ["Year"]).copy(),
+            note="主回归要求 Overpay、lnSubsidy_l1 与控制变量同时完整",
+        )
+    )
+    if unified_df is not None and not unified_df.empty:
+        sample_summary.append(
+            _sample_stage_row(
+                "中介统一样本",
+                unified_df,
+                note="中介模型统一样本，要求 Overpay、Power_FA 与 lnSubsidy_l1 同时完整",
+            )
+        )
+    if sample_summary:
+        pd.DataFrame(sample_summary).to_csv(
+            os.path.join(output_dir, "sample_screening_summary.csv"),
+            index=False,
+        )
 
     power_method_rows = main_regression.get("method_comparison", pd.DataFrame())
     if isinstance(power_method_rows, pd.DataFrame) and not power_method_rows.empty:
@@ -2046,6 +2272,42 @@ def save_structured_outputs(
         os.path.join(output_dir, "causal_results.csv"),
         index=False,
     )
+
+    diagnostics_summary = {
+        "stage1": {
+            "sample_size": int(len(stage1_fit["df_model1"])),
+            "r2": float(stage1_model.rsquared),
+            "adj_r2": float(stage1_model.rsquared_adj),
+            "f_stat": float(stage1_model.fvalue),
+            "f_pvalue": float(stage1_model.f_pvalue),
+        },
+        "model2": {
+            "sample_size": int(main_result.get("sample_size", np.nan)),
+            "r2": float(model2.rsquared) if model2 is not None else np.nan,
+            "f_stat": float(_get_model_fstat(model2)[0]) if model2 is not None else np.nan,
+            "t_stat": float(model2.tstats.get("lnSubsidy_l1", np.nan)) if model2 is not None else np.nan,
+        },
+        "iv": {
+            "sample_size": int(iv_result.get("sample_size", np.nan)) if iv_result else np.nan,
+            "first_stage_coef": float(first_stage.get("coef", np.nan)) if first_stage else np.nan,
+            "partial_r2": float(first_stage.get("partial_r2", np.nan)) if first_stage else np.nan,
+            "partial_f": float(first_stage.get("f_stat", np.nan)) if first_stage else np.nan,
+            "second_stage_coef": float(iv_model.params.get("lnSubsidy_l1", np.nan)) if iv_model is not None else np.nan,
+            "second_stage_t": float(iv_model.tstats.get("lnSubsidy_l1", np.nan)) if iv_model is not None else np.nan,
+        },
+        "vif": {
+            "max": float(vif_df["VIF"].max()),
+            "mean": float(vif_df["VIF"].mean()),
+        },
+        "power_fa": {
+            "kmo_overall": float(fa_diagnostics.get("kmo_overall", np.nan)),
+            "variance_explained_ratio": float(fa_diagnostics.get("variance_explained_ratio", np.nan)),
+        },
+        "bp_test": bp_test,
+        "wooldridge_test": wooldridge_test,
+    }
+    with open(os.path.join(output_dir, "diagnostics_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(diagnostics_summary, f, ensure_ascii=False, indent=2)
 
     grouped_path = os.path.join(output_dir, "grouped_mediation_results.csv")
     if os.path.exists(grouped_path):

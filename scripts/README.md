@@ -28,6 +28,10 @@
   - 作用：完成 Lasso、随机森林、XGBoost、SHAP、分类模型与聚类等机器学习补充分析
   - 主要输出：`results/model_comparison.csv`、`results/classification_comparison.csv` 及 `fig1` 到 `fig8`
 
+- `verify_thesis_consistency.py`
+  - 作用：核对 `thesis_final_bundle/thesis_final_humanized_v2.md` 中的核心实证数字是否与 `results/` 目录中的最新结果逐项一致
+  - 输出：终端一致性校验结果，失败时列出不一致项
+
 ## 辅助脚本
 
 - `panel_regressions.py`
@@ -43,6 +47,7 @@ python scripts/regression_analysis.py
 python scripts/generate_tables.py
 python scripts/generate_tables_docx.py
 python scripts/ml_analysis.py
+python scripts/verify_thesis_consistency.py
 ```
 
 ## 使用说明

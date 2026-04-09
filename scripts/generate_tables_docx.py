@@ -221,7 +221,7 @@ def build_desc_table_docx(doc, df):
         "lnSale": "企业规模(lnSale)",
         "IA": "无形资产占比(IA)",
         "Overpay": "超额薪酬(Overpay)",
-        "Power": "管理层权力(Power, FA)",
+        "Power": "管理层权力(Power, FA口径)",
         "Roa": "资产收益率(Roa)",
         "Lever": "财务杠杆(Lever)",
         "Top1": "第一大股东持股比例(Top1)",

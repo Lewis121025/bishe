@@ -237,7 +237,7 @@ def build_power_method_comparison_table(main_results):
             f"{row['method']:<12} {row['role']:<18} {coef_b:<18} {ci:<34} {row['mediation_type']}"
         )
     lines.append("=" * 110)
-    lines.append("注：FA 为修订后主测度，PCA 为上一版原始方案对照，熵值法为稳健性替代。bootstrap 95%CI 为公司层面 cluster bootstrap（300 次）得到的 95% 置信区间。")
+    lines.append("注：FA 为正文采用的经验性综合口径，PCA 与熵值法仅作对照。bootstrap 95%CI 为公司层面 cluster bootstrap（300 次）得到的 95% 置信区间。")
     return "\n".join(lines)
 
 
@@ -316,7 +316,7 @@ def build_desc_table(df):
         "lnSale": "企业规模(lnSale)",
         "IA": "无形资产占比(IA)",
         "Overpay": "超额薪酬(Overpay)",
-        "Power": "管理层权力(Power, FA)",
+        "Power": "管理层权力(Power, FA口径)",
         "Roa": "业绩(Roa)",
         "Lever": "财务杠杆",
         "Top1": "第一大股东持股比例",

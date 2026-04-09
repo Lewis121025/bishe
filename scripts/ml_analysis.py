@@ -200,7 +200,7 @@ def create_holdout_splits(X, y, y_class, df_ml):
 
 
 def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names, output_dir):
-    """Lasso 回归：交叉验证选 alpha，并输出系数路径。"""
+    """Lasso 回归：内部 KFold 调参选 alpha，外层 GroupKFold 评估泛化表现。"""
     print("\n" + "=" * 70)
     print("第一部分：Lasso 回归 — 变量筛选与正则化")
     print("=" * 70)
@@ -213,10 +213,8 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # Note: LassoCV doesn't support 'groups' parameter directly in fit() with cv=GroupKFold
-    # So we'll use a standard KFold or just GroupKFold via manually providing it if it works,
-    # actually LassoCV doesn't take groups in fit. We'll stick to KFold for LassoCV internal
-    # but the outer train-test split already prevents leakage to test set.
+    # LassoCV 不支持在 fit() 中显式传入 groups，因此 alpha 调参使用普通 KFold；
+    # 但训练/测试切分与外层性能评估均按公司分组，避免同一公司同时进入训练与评估端。
     cv_internal = KFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     
     lasso_cv = LassoCV(alphas=alpha_grid, cv=cv_internal, random_state=RANDOM_STATE, max_iter=20000)
@@ -275,7 +273,7 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
         "cv_mean": float(cv_scores.mean()),
         "cv_std": float(cv_scores.std()),
         "param_summary": {"alpha": float(lasso_cv.alpha_)},
-        "tuning_method": "LassoCV(5折交叉验证)",
+        "tuning_method": "LassoCV(内部KFold调参)+外层GroupKFold评估",
     }
 
 
@@ -482,7 +480,7 @@ def xgboost_regression_analysis(X_train, X_test, y_train, y_test, groups_train, 
         fig, ax = plt.subplots(figsize=(8, 5))
         shap.dependence_plot(subsidy_idx, shap_values, X_sample, interaction_index=issoe_idx,
                              feature_names=feature_names, ax=ax, show=False)
-        ax.set_title("图4a  lnSubsidy × IsSOE 交互效应（SHAP依赖图）", fontsize=13)
+        ax.set_title("图4a  lnSubsidy × IsSOE 关系图（SHAP依赖图）", fontsize=13)
         ax.set_xlabel("lnSubsidy (政府补助对数)")
         ax.set_ylabel("SHAP值 (对超额薪酬的边际影响)")
         plt.tight_layout()
@@ -495,7 +493,7 @@ def xgboost_regression_analysis(X_train, X_test, y_train, y_test, groups_train, 
         fig, ax = plt.subplots(figsize=(8, 5))
         shap.dependence_plot(subsidy_idx, shap_values, X_sample, interaction_index=mgshder_idx,
                              feature_names=feature_names, ax=ax, show=False)
-        ax.set_title("图4b  lnSubsidy × Mgshder 交互效应（SHAP依赖图）", fontsize=13)
+        ax.set_title("图4b  lnSubsidy × Mgshder 关系图（SHAP依赖图）", fontsize=13)
         ax.set_xlabel("lnSubsidy (政府补助对数)")
         ax.set_ylabel("SHAP值 (对超额薪酬的边际影响)")
         plt.tight_layout()
@@ -825,6 +823,8 @@ def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_r
         "split": {
             "test_size": TEST_SIZE,
             "random_state": RANDOM_STATE,
+            "prepared_sample_size": int(len(prepared["df_ml"])),
+            "prepared_company_count": int(prepared["df_ml"]["Symbol"].nunique()),
             "train_size": int(len(splits["train_idx"])),
             "test_size_n": int(len(splits["test_idx"])),
             "holdout_method": "GroupShuffleSplit (by company Symbol)",
@@ -888,6 +888,12 @@ def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_r
 
     summary = {
         "class_balance": class_balance,
+        "ml_sample_size": int(len(prepared["df_ml"])),
+        "ml_company_count": int(prepared["df_ml"]["Symbol"].nunique()),
+        "train_size": int(len(splits["train_idx"])),
+        "test_size": int(len(splits["test_idx"])),
+        "train_company_count": int(splits["groups_train"].nunique()),
+        "test_company_count": int(splits["groups_test"].nunique()),
         "ols_r2": ols_result["test_metrics"]["R²"],
         "lasso_alpha": lasso_result["alpha"],
         "lasso_retained": lasso_result["retained"],

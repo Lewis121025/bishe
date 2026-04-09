@@ -4,11 +4,9 @@
 
 ## 优先查看
 
-- `正文修改.pdf`：论文 PDF 版
-- `正文修改.docx`：论文 Word 版
-- `正文.md`：论文 Markdown 源稿
+- `thesis_final_bundle/thesis_final_humanized_v2.md`：当前采用的论文 Markdown 正文
 - `results/回归结果表.docx`：按论文格式导出的三线表
-- `results/数据分析部分_整理.md`：数据分析结果整理稿
+- `results/regression_tables.txt`：论文表格的文本版汇总
 - `scripts/regression_analysis.py`：主实证分析脚本
 - `scripts/ml_analysis.py`：机器学习补充分析脚本
 
@@ -18,8 +16,8 @@
 - `processed_data/`：由原始 `.dta` 转换后的 CSV 数据
 - `scripts/`：数据处理、回归分析、机器学习分析和表格导出脚本
 - `results/`：回归结果、描述性统计、稳健性检验、机器学习图表与汇总文件
-- `正文修改.docx`、`正文修改.pdf`、`正文.md`：论文正文文件
-- `Gemini审稿意见逐条核验报告.md`、`参考论文笔记_刘剑民2019.md`：过程性参考材料
+- `thesis_final_bundle/`：论文正文及交付稿目录
+- `参考论文笔记_刘剑民2019.md`：过程性参考材料
 
 ## 代码运行顺序
 
@@ -50,7 +48,7 @@ python scripts/ml_analysis.py
 
 如果是压缩后发送给导师，建议保留以下内容：
 
-- 论文正文文件
+- `thesis_final_bundle/`
 - `scripts/`
 - `data/` 与 `processed_data/`
 - `results/`
@@ -67,3 +65,4 @@ python scripts/ml_analysis.py
 
 - `scripts/README.md` 说明各脚本用途与输出。
 - `results/README.md` 说明结果目录中各文件的对应关系。
+- 仓库不再保留旧值草稿、内嵌 base64 的临时正文和 PDF 转 Markdown 中间文件，以避免误用过时口径。

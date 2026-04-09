@@ -2,8 +2,10 @@
   "split": {
     "test_size": 0.2,
     "random_state": 42,
-    "train_size": 40194,
-    "test_size_n": 10124,
+    "prepared_sample_size": 45331,
+    "prepared_company_count": 5068,
+    "train_size": 36150,
+    "test_size_n": 9181,
     "holdout_method": "GroupShuffleSplit (by company Symbol)",
     "group_isolation": true,
     "classification_stratified": false
@@ -15,9 +17,9 @@
     "classification": "GroupKFold(n_splits=5)"
   },
   "class_balance": {
-    "positive_count": 24948,
-    "negative_count": 25370,
-    "positive_ratio": 0.4958066695814619,
+    "positive_count": 22275,
+    "negative_count": 23056,
+    "positive_ratio": 0.49138558602281,
     "imbalance_judgment": "不严重失衡",
     "resampling": "未使用SMOTE",
     "handling": "holdout采用GroupShuffleSplit按公司分组随机划分（8:2），确保同一公司全部年度仅进入训练或测试集之一；分类模型调参比较 class_weight / scale_pos_weight"
@@ -208,7 +210,7 @@
       ],
       "scale_pos_weight": [
         1.0,
-        1.0096
+        1.0455
       ]
     },
     "decision_tree": {
@@ -231,7 +233,7 @@
   "best_params": {
     "ols": {},
     "lasso": {
-      "alpha": 0.00021826447283974872
+      "alpha": 0.0001
     },
     "rf_regression": {
       "n_estimators": 300,
@@ -240,11 +242,11 @@
       "max_depth": 10
     },
     "rf_classification": {
-      "n_estimators": 300,
-      "min_samples_leaf": 10,
-      "max_features": "sqrt",
+      "n_estimators": 400,
+      "min_samples_leaf": 20,
+      "max_features": 1.0,
       "max_depth": null,
-      "class_weight": null
+      "class_weight": "balanced"
     },
     "xgb_regression": {
       "subsample": 0.7,
@@ -255,22 +257,22 @@
       "colsample_bytree": 0.7
     },
     "logit": {
-      "model__C": 1.0,
+      "model__C": 0.1,
       "model__class_weight": "balanced"
     },
     "xgb_classification": {
-      "subsample": 0.8,
-      "scale_pos_weight": 1.0096,
-      "n_estimators": 400,
+      "subsample": 1.0,
+      "scale_pos_weight": 1.0455,
+      "n_estimators": 200,
       "min_child_weight": 10,
-      "max_depth": 4,
-      "learning_rate": 0.03,
-      "colsample_bytree": 0.7
+      "max_depth": 6,
+      "learning_rate": 0.05,
+      "colsample_bytree": 1.0
     },
     "decision_tree": {
-      "class_weight": null,
-      "max_depth": 3,
-      "min_samples_leaf": 50
+      "class_weight": "balanced",
+      "max_depth": 5,
+      "min_samples_leaf": 200
     }
   }
 }
