@@ -518,10 +518,8 @@ def xgboost_regression_analysis(X_train, X_test, y_train, y_test, groups_train, 
         "feature_names": feature_names,
         "ax": ax,
         "show": False,
+        "interaction_index": None,
     }
-    # 图5-3需要直接展示产权性质的颜色分层，以与正文解读保持一致。
-    if "IsSOE" in feature_names:
-        dependence_kwargs["interaction_index"] = feature_names.index("IsSOE")
     shap.dependence_plot(subsidy_idx, shap_values, X_sample, **dependence_kwargs)
     ax.set_title("图5-3  财政补贴的SHAP依赖图", fontsize=13)
     ax.set_xlabel("lnSubsidy (政府补助对数)")
