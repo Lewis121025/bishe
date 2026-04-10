@@ -12,7 +12,7 @@
   },
   "cross_validation": {
     "folds": 5,
-    "lasso_internal": "KFold(shuffle=True)",
+    "lasso_internal": "GroupKFold(n_splits=5)",
     "regression": "GroupKFold(n_splits=5)",
     "classification": "GroupKFold(n_splits=5)"
   },
@@ -233,7 +233,9 @@
   "best_params": {
     "ols": {},
     "lasso": {
-      "alpha": 0.0002652948464431895
+      "alpha": 0.0022695105366946685,
+      "alpha_search_cv_mean": 0.02483291254061859,
+      "alpha_search_cv_std": 0.004523355583270864
     },
     "rf_regression": {
       "n_estimators": 300,

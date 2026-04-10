@@ -30,9 +30,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import shap
 import xgboost as xgb
+from matplotlib import font_manager
 from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.linear_model import Lasso, LassoCV, LinearRegression, LogisticRegression
+from sklearn.linear_model import Lasso, LinearRegression, LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -47,11 +48,8 @@ from sklearn.metrics import (
 from sklearn.model_selection import (
     GridSearchCV,
     GroupShuffleSplit,
-    KFold,
     RandomizedSearchCV,
-    StratifiedKFold,
     cross_val_score,
-    train_test_split,
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -60,9 +58,16 @@ from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.utils.parallel")
 
-plt.rcParams["font.sans-serif"] = ["Arial Unicode MS", "SimHei", "Heiti TC", "PingFang SC"]
+plt.rcParams["font.sans-serif"] = ["Heiti SC", "STHeiti", "Arial Unicode MS", "SimHei", "Heiti TC", "STSong"]
 plt.rcParams["axes.unicode_minus"] = False
 plt.rcParams["figure.dpi"] = 150
+
+_CJK_FONT_CANDIDATES = [
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/Library/Fonts/Arial Unicode.ttf",
+]
+_TITLE_FONT = next((font_manager.FontProperties(fname=path, size=16) for path in _CJK_FONT_CANDIDATES if os.path.exists(path)), None)
 
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
@@ -119,6 +124,46 @@ def _classification_cv_roc_auc(model, X_train, y_train, groups_train, cv):
         n_jobs=1,
     )
     return float(scores.mean()), float(scores.std())
+
+
+def _grouped_lasso_alpha_search(X_train, y_train, groups_train, alpha_grid, cv):
+    """在公司分组口径下搜索使平均 CV R² 最高的 alpha。"""
+    rows = []
+    best_alpha = None
+    best_score = -np.inf
+    best_std = None
+
+    for alpha in alpha_grid:
+        model = Pipeline([
+            ("scaler", StandardScaler()),
+            ("model", Lasso(alpha=alpha, max_iter=20000)),
+        ])
+        scores = cross_val_score(
+            model,
+            X_train,
+            y_train,
+            groups=groups_train,
+            cv=cv,
+            scoring="r2",
+            n_jobs=1,
+        )
+        score_mean = float(scores.mean())
+        score_std = float(scores.std())
+        rows.append({
+            "alpha": float(alpha),
+            "cv_r2_mean": score_mean,
+            "cv_r2_std": score_std,
+        })
+
+        if score_mean > best_score + 1e-12 or (
+            np.isclose(score_mean, best_score, atol=1e-12) and (best_alpha is None or alpha < best_alpha)
+        ):
+            best_alpha = float(alpha)
+            best_score = score_mean
+            best_std = score_std
+
+    alpha_df = pd.DataFrame(rows).sort_values("alpha").reset_index(drop=True)
+    return best_alpha, best_score, best_std, alpha_df
 
 
 def prepare_ml_data(df):
@@ -200,7 +245,7 @@ def create_holdout_splits(X, y, y_class, df_ml):
 
 
 def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names, output_dir):
-    """Lasso 回归：内部 KFold 调参选 alpha，外层 GroupKFold 评估泛化表现。"""
+    """Lasso 回归：按公司分组搜索 alpha，并用同一分组口径评估泛化表现。"""
     print("\n" + "=" * 70)
     print("第一部分：Lasso 回归 — 变量筛选与正则化")
     print("=" * 70)
@@ -209,35 +254,34 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
     cv = GroupKFold(n_splits=CV_FOLDS)
     alpha_grid = np.logspace(-4, 1, 60)
 
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-
-    # LassoCV 不支持在 fit() 中显式传入 groups，因此 alpha 调参使用普通 KFold；
-    # 但训练/测试切分与外层性能评估均按公司分组，避免同一公司同时进入训练与评估端。
-    cv_internal = KFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
-    
-    lasso_cv = LassoCV(alphas=alpha_grid, cv=cv_internal, random_state=RANDOM_STATE, max_iter=20000)
-    lasso_cv.fit(X_train_scaled, y_train)
-    y_pred = lasso_cv.predict(X_test_scaled)
-    metrics = _regression_metrics(y_test, y_pred)
+    best_alpha, best_cv_mean, best_cv_std, alpha_df = _grouped_lasso_alpha_search(
+        X_train, y_train, groups_train, alpha_grid, cv
+    )
+    alpha_df.to_csv(os.path.join(output_dir, "lasso_alpha_search.csv"), index=False)
 
     lasso_fixed = Pipeline([
         ("scaler", StandardScaler()),
-        ("model", Lasso(alpha=lasso_cv.alpha_, max_iter=20000)),
+        ("model", Lasso(alpha=best_alpha, max_iter=20000)),
     ])
+    lasso_fixed.fit(X_train, y_train)
+    y_pred = lasso_fixed.predict(X_test)
+    metrics = _regression_metrics(y_test, y_pred)
     cv_scores = cross_val_score(lasso_fixed, X_train, y_train, groups=groups_train, cv=cv, scoring="r2", n_jobs=1)
+
+    scaler = lasso_fixed.named_steps["scaler"]
+    lasso_model = lasso_fixed.named_steps["model"]
+    X_train_scaled = scaler.transform(X_train)
 
     coefs = pd.DataFrame({
         "变量": feature_names,
-        "Lasso系数": lasso_cv.coef_,
+        "Lasso系数": lasso_model.coef_,
     }).sort_values("Lasso系数", key=abs, ascending=False)
     coefs.to_csv(os.path.join(output_dir, "lasso_coefficients.csv"), index=False)
 
     retained = coefs.loc[coefs["Lasso系数"].abs() > 1e-6, "变量"].tolist()
     removed = coefs.loc[coefs["Lasso系数"].abs() <= 1e-6, "变量"].tolist()
 
-    print(f"  最优 alpha = {lasso_cv.alpha_:.6f}")
+    print(f"  最优 alpha = {best_alpha:.6f}")
     print(f"  测试集 R² = {metrics['R²']:.4f}")
     print(f"  5-fold CV R² = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
     print(f"  保留变量数 = {len(retained)}")
@@ -252,11 +296,11 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
     fig, ax = plt.subplots(figsize=(10, 6))
     for idx, name in enumerate(feature_names):
         ax.plot(alpha_grid, coef_paths[:, idx], label=name)
-    ax.axvline(lasso_cv.alpha_, color="black", linestyle="--", label=f"最优α={lasso_cv.alpha_:.4f}")
+    ax.axvline(best_alpha, color="black", linestyle="--", label=f"最优α={best_alpha:.4f}")
     ax.set_xscale("log")
     ax.set_xlabel("正则化参数 α (log)")
     ax.set_ylabel("Lasso 回归系数")
-    ax.set_title("图1  Lasso 正则化路径图")
+    ax.set_title("图5-5 Lasso系数收缩图", fontproperties=_TITLE_FONT)
     ax.legend(fontsize=7, loc="best", ncol=2)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -264,16 +308,20 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
     plt.close()
 
     return {
-        "model": lasso_cv,
-        "alpha": float(lasso_cv.alpha_),
+        "model": lasso_fixed,
+        "alpha": float(best_alpha),
         "retained": retained,
         "removed": removed,
         "coefficients": coefs,
         "test_metrics": metrics,
         "cv_mean": float(cv_scores.mean()),
         "cv_std": float(cv_scores.std()),
-        "param_summary": {"alpha": float(lasso_cv.alpha_)},
-        "tuning_method": "LassoCV(内部KFold调参)+外层GroupKFold评估",
+        "param_summary": {
+            "alpha": float(best_alpha),
+            "alpha_search_cv_mean": float(best_cv_mean),
+            "alpha_search_cv_std": float(best_cv_std),
+        },
+        "tuning_method": "自定义alpha网格搜索(内外层均为GroupKFold)",
     }
 
 
@@ -384,7 +432,7 @@ def random_forest_analysis(X_train, X_test, y_train, y_test, yc_train, yc_test, 
     axes[1].barh(clf_sorted["变量"], clf_sorted["分类重要性"], color="coral")
     axes[1].set_title(f"(b) 随机森林分类特征重要性\nF1={rf_clf_metrics['F1']:.4f}")
     axes[1].set_xlabel("重要性")
-    plt.suptitle("图2  随机森林特征重要性分析", fontsize=14, y=1.02)
+    plt.suptitle("图5-2  随机森林特征重要性剖析", fontsize=14, y=1.02)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "fig2_rf_importance.png"), bbox_inches="tight")
     plt.close()
@@ -459,15 +507,23 @@ def xgboost_regression_analysis(X_train, X_test, y_train, y_test, groups_train, 
     shap_df.to_csv(os.path.join(output_dir, "shap_importance.csv"), index=False)
 
     shap.summary_plot(shap_values, X_sample, feature_names=feature_names, show=False, max_display=14)
-    plt.title("图3  SHAP 特征重要性分析（XGBoost）", fontsize=14, pad=20)
+    plt.title("图5-1  SHAP 特征重要性汇总图", fontsize=14, pad=20)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "fig3_shap_summary.png"), bbox_inches="tight")
     plt.close()
 
     subsidy_idx = feature_names.index("lnSubsidy")
     fig, ax = plt.subplots(figsize=(8, 5))
-    shap.dependence_plot(subsidy_idx, shap_values, X_sample, feature_names=feature_names, ax=ax, show=False)
-    ax.set_title("图4  政府补助(lnSubsidy)的 SHAP 依赖图", fontsize=13)
+    dependence_kwargs = {
+        "feature_names": feature_names,
+        "ax": ax,
+        "show": False,
+    }
+    # 图5-3需要直接展示产权性质的颜色分层，以与正文解读保持一致。
+    if "IsSOE" in feature_names:
+        dependence_kwargs["interaction_index"] = feature_names.index("IsSOE")
+    shap.dependence_plot(subsidy_idx, shap_values, X_sample, **dependence_kwargs)
+    ax.set_title("图5-3  财政补贴的SHAP依赖图", fontsize=13)
     ax.set_xlabel("lnSubsidy (政府补助对数)")
     ax.set_ylabel("SHAP值 (对超额薪酬的边际影响)")
     plt.tight_layout()
@@ -480,7 +536,7 @@ def xgboost_regression_analysis(X_train, X_test, y_train, y_test, groups_train, 
         fig, ax = plt.subplots(figsize=(8, 5))
         shap.dependence_plot(subsidy_idx, shap_values, X_sample, interaction_index=issoe_idx,
                              feature_names=feature_names, ax=ax, show=False)
-        ax.set_title("图4a  lnSubsidy × IsSOE 关系图（SHAP依赖图）", fontsize=13)
+        ax.set_title("图5-4a  SHAP交互图：lnSubsidy × IsSOE", fontsize=13)
         ax.set_xlabel("lnSubsidy (政府补助对数)")
         ax.set_ylabel("SHAP值 (对超额薪酬的边际影响)")
         plt.tight_layout()
@@ -493,7 +549,7 @@ def xgboost_regression_analysis(X_train, X_test, y_train, y_test, groups_train, 
         fig, ax = plt.subplots(figsize=(8, 5))
         shap.dependence_plot(subsidy_idx, shap_values, X_sample, interaction_index=mgshder_idx,
                              feature_names=feature_names, ax=ax, show=False)
-        ax.set_title("图4b  lnSubsidy × Mgshder 关系图（SHAP依赖图）", fontsize=13)
+        ax.set_title("图5-4b  SHAP交互图：lnSubsidy × Mgshder", fontsize=13)
         ax.set_xlabel("lnSubsidy (政府补助对数)")
         ax.set_ylabel("SHAP值 (对超额薪酬的边际影响)")
         plt.tight_layout()
@@ -796,7 +852,7 @@ def build_regression_comparison(ols_result, lasso_result, rf_result, xgb_result,
         axes[idx].set_title(metric)
         for bar, val in zip(bars, vals):
             axes[idx].text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{val:.4f}", ha="center", va="bottom", fontsize=9)
-    plt.suptitle("图8  回归模型性能对比（含 OLS 基准）", fontsize=14, y=1.02)
+    plt.suptitle("图5-6  回归模型拟合表现对比（含 OLS 基准）", fontsize=14, y=1.02)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "fig8_model_comparison.png"), bbox_inches="tight")
     plt.close()
@@ -833,7 +889,7 @@ def save_ml_outputs(output_dir, prepared, splits, ols_result, lasso_result, rf_r
         },
         "cross_validation": {
             "folds": CV_FOLDS,
-            "lasso_internal": "KFold(shuffle=True)",
+            "lasso_internal": "GroupKFold(n_splits=5)",
             "regression": "GroupKFold(n_splits=5)",
             "classification": "GroupKFold(n_splits=5)",
         },
@@ -980,7 +1036,7 @@ def main():
     print("\n" + "=" * 70)
     print("机器学习补充分析完成")
     print("=" * 70)
-    print("已生成：model_comparison.csv、classification_comparison.csv、ml_tuning_summary.json、ml_summary.json 及 fig1-fig8 图表。")
+    print("已生成：model_comparison.csv、classification_comparison.csv、lasso_alpha_search.csv、ml_tuning_summary.json、ml_summary.json 及 fig1-fig8 图表。")
 
 
 if __name__ == "__main__":

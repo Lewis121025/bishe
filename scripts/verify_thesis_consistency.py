@@ -5,15 +5,24 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import html
 import json
 import re
 import sys
 from pathlib import Path
+from statistics import mean, median
+
+try:
+    from scipy import stats as scipy_stats
+except Exception:  # pragma: no cover - fallback for environments without scipy
+    scipy_stats = None
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-THESIS_PATH = ROOT_DIR / "thesis_final_bundle" / "thesis_final_humanized_v2.md"
+BUNDLE_DIR = ROOT_DIR / "thesis_final_bundle"
+THESIS_PATH = BUNDLE_DIR / "thesis_final_humanized_v2.md"
+BUNDLE_IMAGES_DIR = BUNDLE_DIR / "images"
 RESULTS_DIR = ROOT_DIR / "results"
 
 
@@ -53,6 +62,10 @@ def fmt_t(value: str | int | float, digits: int = 2) -> str:
 
 def fmt_p(value: str | int | float, digits: int = 3) -> str:
     return f"{float(value):.{digits}f}"
+
+
+def fmt_p_cell(value: float) -> str:
+    return "<0.001" if value < 0.001 else f"{value:.3f}"
 
 
 def fmt_pct(value: str | int | float, digits: int = 2) -> str:
@@ -107,6 +120,25 @@ def normalize_tables(text: str) -> str:
     return text + "\n" + "\n".join(rows)
 
 
+def file_md5(path: Path) -> str:
+    return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def check_bundle_images(thesis_raw: str, failures: list[str]) -> None:
+    image_names = sorted(set(re.findall(r"!\[.*?\]\(\./images/([^)]+)\)", thesis_raw)))
+    for name in image_names:
+        bundle_path = BUNDLE_IMAGES_DIR / name
+        result_path = RESULTS_DIR / name
+        if not bundle_path.exists():
+            failures.append(f"[缺失] bundle 图片不存在: {bundle_path}")
+            continue
+        if not result_path.exists():
+            failures.append(f"[缺失] results 图片不存在: {result_path}")
+            continue
+        if file_md5(bundle_path) != file_md5(result_path):
+            failures.append(f"[不同步] bundle 图片与 results 不一致: {name}")
+
+
 def check_st_rows(failures: list[str]) -> None:
     prefix = re.compile(r"^(?:[A-Z]+)?(?:S\*ST|\*ST|SST|PT|ST)", re.IGNORECASE)
     suffix = re.compile(r"(?:退市整理|退市|退)$", re.IGNORECASE)
@@ -121,10 +153,76 @@ def check_st_rows(failures: list[str]) -> None:
                 break
 
 
+def compute_soe_identifiable_ratio() -> float:
+    ownership_rows = read_csv_map("heterogeneity_ownership_results.csv", "group")
+    mechanism_rows = {(row["group_type"], row["group"]): row for row in read_csv_rows("heterogeneity_mechanism_results.csv")}
+    total = float(ownership_rows["国有企业"]["sample_size"])
+    identifiable = float(mechanism_rows[("央地国企", "央企")]["sample_size"]) + float(
+        mechanism_rows[("央地国企", "地方国企")]["sample_size"]
+    )
+    return identifiable / total if total else 0.0
+
+
+def compute_ml_retention_comparison() -> dict[str, object]:
+    feature_cols = [
+        "IsSOE",
+        "lnSubsidy",
+        "Roa",
+        "Lever",
+        "Top1",
+        "Boardsize",
+        "Dual",
+        "Insider",
+        "Mgshder",
+        "Tenure",
+        "Zone",
+        "Industry",
+        "lnSale",
+        "IA",
+        "Overpay",
+    ]
+    stats_cols = ["Overpay", "lnSubsidy", "Roa", "Lever", "Top1", "lnSale"]
+    keep = {col: [] for col in stats_cols}
+    drop = {col: [] for col in stats_cols}
+    keep_n = 0
+    drop_n = 0
+
+    with (RESULTS_DIR / "regression_dataset.csv").open("r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            is_keep = all((row.get(col) or "") != "" for col in feature_cols)
+            target = keep if is_keep else drop
+            if is_keep:
+                keep_n += 1
+            else:
+                drop_n += 1
+            for col in stats_cols:
+                value = row.get(col) or ""
+                if value != "":
+                    target[col].append(float(value))
+
+    summary: dict[str, dict[str, float]] = {}
+    for col in stats_cols:
+        p_value = 1.0
+        if scipy_stats is not None:
+            _, p_value = scipy_stats.ttest_ind(keep[col], drop[col], equal_var=False, nan_policy="omit")
+        summary[col] = {
+            "keep_mean": mean(keep[col]),
+            "keep_median": median(keep[col]),
+            "drop_mean": mean(drop[col]),
+            "drop_median": median(drop[col]),
+            "diff": mean(keep[col]) - mean(drop[col]),
+            "p_value": p_value,
+        }
+
+    return {"keep_n": keep_n, "drop_n": drop_n, "summary": summary}
+
+
 def main() -> int:
     thesis_raw = THESIS_PATH.read_text(encoding="utf-8")
     thesis = normalize_tables(thesis_raw)
     failures: list[str] = []
+
+    check_bundle_images(thesis_raw, failures)
 
     sample_map = read_csv_map("sample_screening_summary.csv", "stage")
     desc_map = read_csv_map("descriptive_statistics.csv", "变量")
@@ -144,6 +242,7 @@ def main() -> int:
     shap_rows = read_csv_rows("shap_importance.csv")
     power_fa = read_csv_rows("power_fa_diagnostics.csv")[0]
     stage1_map = read_csv_map("stage1_results.csv", "key_var")
+    retention = compute_ml_retention_comparison()
 
     sample_chain = (
         f"原始公司—年度观测为{fmt_int(sample_map['原始公司-年观测']['observations'])}条；"
@@ -154,7 +253,7 @@ def main() -> int:
         f"纳入管理层权力底层指标后，可用于构造 Power 的样本为{fmt_int(sample_map['可用于构造 Power 的样本']['observations'])}条；"
         f"在基准回归中加入滞后一期补助变量后，模型2样本为{fmt_int(sample_map['模型2主回归样本']['observations'])}条；"
         f"在中介效应检验中要求 Overpay、Power 与滞后补助均完整后，统一样本为{fmt_int(sample_map['中介统一样本']['observations'])}条；"
-        f"机器学习部分在进一步要求 `IsSOE` 等特征完整后，可用样本为{fmt_int(ml_summary['ml_sample_size'])}条。"
+        f"机器学习部分在进一步要求国有企业标记变量 IsSOE 等特征完整后，可用样本为{fmt_int(ml_summary['ml_sample_size'])}条。"
     )
     expect(thesis, sample_chain, "第三章样本筛选链", failures)
 
@@ -215,10 +314,15 @@ def main() -> int:
     expect(thesis, f"| F统计量 | {fmt_plain(diagnostics['model2']['f_stat'], 2)}*** |", "模型2F统计量", failures)
 
     iv_map = read_csv_map("iv_comparison_results.csv", "role")
+    shiftshare_map = read_csv_map("iv_shiftshare_results.csv", "role")
     heckman = read_csv_rows("heckman_results.csv")[0]
     iv_benchmark = iv_map["benchmark"]
     iv_simple = iv_map["simple"]
     iv_refined = iv_map["refined"]
+    iv_province_l3 = iv_map["province_l3"]
+    iv_lewbel = iv_map["lewbel"]
+    iv_shiftshare_single = shiftshare_map["shiftshare_single"]
+    iv_shiftshare_double = shiftshare_map["shiftshare_double"]
     expect(
         thesis,
         f"| 基准工具变量 | 滞后一期同城同年其他企业平均补助 | Partial F = {fmt_plain(iv_benchmark['partial_f'], 2)} | {fmt_fixed(iv_benchmark['second_stage_coef'])}（t = {fmt_fixed(iv_benchmark['second_stage_t'], 4)}） | {fmt_int(iv_benchmark['sample_size'])} |",
@@ -239,6 +343,30 @@ def main() -> int:
     )
     expect(
         thesis,
+        f"| 深度滞后省均值工具变量 | 滞后三期同省同年其他企业平均补助 | Partial F = {fmt_plain(iv_province_l3['partial_f'], 2)} | {fmt_plain(iv_province_l3['second_stage_coef'])}**（t = {fmt_plain(iv_province_l3['second_stage_t'], 4)}） | {fmt_int(iv_province_l3['sample_size'])} |",
+        "IV 深度滞后省均值工具行",
+        failures,
+    )
+    expect(
+        thesis,
+        f"| Lewbel 异方差内生工具变量 | 控制变量与一阶段残差乘积（PCA降维至3个主成分） | Partial F = {fmt_plain(iv_lewbel['partial_f'], 2)}；OverID p = {fmt_plain(iv_lewbel['overid_p'], 3)} | {fmt_plain(iv_lewbel['second_stage_coef'])}（t = {fmt_plain(iv_lewbel['second_stage_t'], 4)}） | {fmt_int(iv_lewbel['sample_size'])} |",
+        "IV Lewbel 工具行",
+        failures,
+    )
+    expect(
+        thesis,
+        f"| shift-share单工具 | 企业早期补贴暴露度 × 全国（排除本省）行业补贴增量 | Partial F = {fmt_plain(iv_shiftshare_single['partial_f'], 2)} | {fmt_plain(iv_shiftshare_single['second_stage_coef'])}†（t = {fmt_plain(iv_shiftshare_single['second_stage_t'], 4)}） | {fmt_int(iv_shiftshare_single['sample_size'])} |",
+        "IV shift-share单工具行",
+        failures,
+    )
+    expect(
+        thesis,
+        f"| shift-share双工具 | 省—行业正补助暴露度 × 全国（排除本省）行业补贴增量 + 企业早期补贴暴露度 × 全国（排除本省）行业补贴增量 | Partial F = {fmt_plain(iv_shiftshare_double['partial_f'], 2)}；OverID p = {fmt_plain(iv_shiftshare_double['overid_p'], 3)} | {fmt_plain(iv_shiftshare_double['second_stage_coef'])}（t = {fmt_plain(iv_shiftshare_double['second_stage_t'], 4)}） | {fmt_int(iv_shiftshare_double['sample_size'])} |",
+        "IV shift-share双工具行",
+        failures,
+    )
+    expect(
+        thesis,
         f"| Heckman 两步法 | 选择方程排除变量：IV_lnSubsidy_l1 | IMR p = {fmt_plain(heckman['imr_p'], 4)} | {fmt_coef(heckman['subsidy_coef'], heckman['subsidy_p'])}（t = {fmt_plain(heckman['subsidy_t'], 4)}） | {fmt_int(heckman['outcome_sample_size'])} |",
         "Heckman 结果行",
         failures,
@@ -255,8 +383,6 @@ def main() -> int:
     expect(thesis, f"| 模型5 直接效应 c'：lnSubsidy_l1 → Overpay | {fmt_coef(med['coef_c_prime'], med['p_c_prime'])} | {fmt_plain(med_c_prime['se'])} | — |", "中介直接效应行", failures)
     expect(thesis, f"| 间接效应 a×b | {float(med['indirect_effect']):.6f} | — | [{float(med['bootstrap_ci_lower']):.6f}, {float(med['bootstrap_ci_upper']):.6f}] |", "中介间接效应行", failures)
     expect(thesis, f"| Sobel p 值 | {float(med['sobel_p']):.4f} | — | — |", "Sobel p 值行", failures)
-    expect(thesis, f"| 中介效应占比（a×b/c） | {float(med['mediation_ratio_pct']):.2f}% | — | — |", "中介占比行", failures)
-
     expect(thesis, f"| (1) 替换因变量 | 高管前三名薪酬对数 | {fmt_plain(robust_map['替换因变量']['coef'])}*** | {fmt_plain(robust_map['替换因变量']['t_value'], 4)} | {fmt_int(robust_map['替换因变量']['sample_size'])} | {fmt_plain(robust_map['替换因变量']['r_squared'])} |", "稳健性1", failures)
     expect(thesis, f"| (2) 缩小样本期（2010—2020） | Overpay | {fmt_plain(robust_map['缩小样本期(2010-2020)']['coef'])} | {fmt_plain(robust_map['缩小样本期(2010-2020)']['t_value'], 4)} | {fmt_int(robust_map['缩小样本期(2010-2020)']['sample_size'])} | {fmt_plain(robust_map['缩小样本期(2010-2020)']['r_squared'])} |", "稳健性2", failures)
     expect(thesis, f"| (3) 仅制造业 | Overpay | {fmt_fixed(robust_map['仅制造业']['coef'])} | {fmt_fixed(robust_map['仅制造业']['t_value'], 4)} | {fmt_int(robust_map['仅制造业']['sample_size'])} | {fmt_plain(robust_map['仅制造业']['r_squared'])} |", "稳健性3", failures)
@@ -268,7 +394,18 @@ def main() -> int:
     expect(thesis, "| lnSubsidy_l1 | −0.0006（−0.36） | 0.0008（0.79） |", "行业异质性核心行", failures)
     expect(thesis, f"| N | {fmt_int(mech_map[('行业管制', '管制行业')]['sample_size'])} | {fmt_int(mech_map[('行业管制', '非管制行业')]['sample_size'])} |", "行业异质性样本量", failures)
     expect(thesis, "| lnSubsidy_l1 | −0.0006（−0.33） | −0.0012（−0.88） |", "央地异质性核心行", failures)
-    expect(thesis, "央地可识别比例为74.53%", "央地可识别比例", failures)
+    expect(thesis, f"央地可识别比例为{compute_soe_identifiable_ratio() * 100:.2f}%", "央地可识别比例", failures)
+
+    placebo_fe = diagnostics.get("placebo_fe_comparison", [])
+    placebo_f1_indyr = next((row for row in placebo_fe if row.get("key_var") == "lnSubsidy_f1" and row.get("fe_mode") == "entity_industry_year"), None)
+    placebo_f2_indyr = next((row for row in placebo_fe if row.get("key_var") == "lnSubsidy_f2" and row.get("fe_mode") == "entity_industry_year"), None)
+    if placebo_f1_indyr and placebo_f2_indyr:
+        expect(
+            thesis_raw,
+            f"未来一期补贴的系数降为{fmt_plain(placebo_f1_indyr['coef'])}，$p$ 值升至{fmt_p(placebo_f1_indyr['p_value'], 3)}，未来两期补贴的系数则仍为{fmt_plain(placebo_f2_indyr['coef'])}（$p = {fmt_p(placebo_f2_indyr['p_value'], 3)}$）",
+            "行业×年份固定效应安慰剂说明",
+            failures,
+        )
 
     expect(thesis, f"机器学习部分使用{fmt_int(ml_summary['ml_sample_size'])}个样本", "ML 样本量", failures)
     expect(
@@ -278,9 +415,9 @@ def main() -> int:
         failures,
     )
     expect(thesis, f"正类{fmt_int(ml_summary['class_balance']['positive_count'])}个、负类{fmt_int(ml_summary['class_balance']['negative_count'])}个，比例约为{float(ml_summary['class_balance']['positive_ratio']) * 100:.2f}%", "ML 类别分布", failures)
-    expect(thesis, f"最优惩罚参数为 $\\lambda^*=0.0001$", "Lasso alpha", failures)
-    expect(thesis, "`lnSubsidy`、`Roa` 和 `Mgshder` 位于最重要的几类特征之中", "SHAP 排序描述", failures)
-    expect(thesis, "在回归设定中，`Roa`、`Top1`、`Mgshder` 和 `lnSubsidy` 均位于前列", "RF 回归重要性描述", failures)
+    expect(thesis, f"最优惩罚参数为 $\\lambda^*=0.0023$", "Lasso alpha", failures)
+    expect(thesis, "财政补贴变量 lnSubsidy、Roa 和 Mgshder 位于最重要的几类特征之中", "SHAP 排序描述", failures)
+    expect(thesis, "在回归设定中，Roa、Top1、Mgshder 和 lnSubsidy 均位于前列", "RF 回归重要性描述", failures)
     expect(thesis, f"| OLS | {fmt_plain(model_map['OLS']['测试集R²'])} | {fmt_plain(model_map['OLS']['RMSE'])} | {fmt_plain(model_map['OLS']['MAE'])} | {fmt_plain(model_map['OLS']['5折CV R²均值'])} ± {fmt_plain(model_map['OLS']['5折CV R²标准差'])} |", "ML 回归表 OLS", failures)
     expect(thesis, f"| Lasso | {fmt_plain(model_map['Lasso']['测试集R²'])} | {fmt_plain(model_map['Lasso']['RMSE'])} | {fmt_plain(model_map['Lasso']['MAE'])} | {fmt_plain(model_map['Lasso']['5折CV R²均值'])} ± {fmt_plain(model_map['Lasso']['5折CV R²标准差'])} |", "ML 回归表 Lasso", failures)
     expect(thesis, f"| 随机森林 | {fmt_plain(model_map['RandomForest']['测试集R²'])} | {fmt_plain(model_map['RandomForest']['RMSE'])} | {fmt_plain(model_map['RandomForest']['MAE'])} | {fmt_plain(model_map['RandomForest']['5折CV R²均值'])} ± {fmt_plain(model_map['RandomForest']['5折CV R²标准差'])} |", "ML 回归表 RF", failures)
@@ -290,11 +427,71 @@ def main() -> int:
     expect(thesis, f"| XGBoost分类器 | {fmt_plain(clf_map['XGBoostClassifier']['Accuracy'])} | {fmt_plain(clf_map['XGBoostClassifier']['Precision'])} | {fmt_plain(clf_map['XGBoostClassifier']['Recall'])} | {fmt_plain(clf_map['XGBoostClassifier']['F1'])} | {fmt_plain(clf_map['XGBoostClassifier']['ROC_AUC'])} | {fmt_plain(clf_map['XGBoostClassifier']['5折CV ROC_AUC'])} |", "ML 分类表 XGB", failures)
     expect(thesis, f"| 决策树 | {fmt_plain(clf_map['DecisionTree']['Accuracy'])} | {fmt_plain(clf_map['DecisionTree']['Precision'])} | {fmt_plain(clf_map['DecisionTree']['Recall'])} | {fmt_plain(clf_map['DecisionTree']['F1'])} | {fmt_plain(clf_map['DecisionTree']['ROC_AUC'])} | {fmt_plain(clf_map['DecisionTree']['5折CV ROC_AUC'])} |", "ML 分类表 决策树", failures)
 
-    expect(thesis, f"（$\\beta = {fmt_plain(model2['coef'])}$，$p = {fmt_p(model2['p'])}$）", "摘要主回归值", failures)
-    expect(thesis, f"精炼双工具后，第二阶段系数转为显著负值（$\\beta = {fmt_fixed(iv_refined['second_stage_coef'], 4, unicode_minus=False)}$，$p = {fmt_p(iv_refined['second_stage_p'])}$）", "摘要精炼双工具", failures)
-    expect(thesis, f"针对仅正补助样本的 Heckman 两步校正显示逆米尔斯比率显著（$p = {fmt_p(heckman['imr_p'])}$），而补贴系数仍为正且显著（$\\beta = {fmt_plain(heckman['subsidy_coef'])}$，$p = {fmt_p(heckman['subsidy_p'])}$）", "摘要Heckman", failures)
-    expect(thesis, f"路径$a$虽为正，但未达到常用显著性水平（$p = {fmt_p(med_a['p'])}$）", "摘要路径a", failures)
-    expect(thesis, f"间接效应约为{float(med['indirect_effect']):.6f}，Bootstrap 95%置信区间为[{float(med['bootstrap_ci_lower']):.6f}, {float(med['bootstrap_ci_upper']):.6f}]", "摘要间接效应", failures)
+    expect(
+        thesis,
+        "由此可见，现有识别证据尚未形成一致支持。",
+        "摘要识别边界",
+        failures,
+    )
+    expect(
+        thesis,
+        "管理层权力中介效应未获稳健支持",
+        "摘要Power边界",
+        failures,
+    )
+    expect(
+        thesis,
+        "机器学习部分主要用于补充说明变量信息含量、局部结构和模型比较，不替代第四章的计量结论。",
+        "摘要ML定位",
+        failures,
+    )
+    expect(
+        thesis,
+        "全样本口径同时混合了“是否获得补助”和“获得补助后的强弱差异”，而仅正补助口径只比较已获补助企业内部的补贴强弱，因此两者并不在回答同一个经济问题",
+        "稳健性口径差异解释",
+        failures,
+    )
+    expect(
+        thesis,
+        "整体上，本文发现财政补贴与高管超额薪酬之间存在一定关联，但全样本平均直接效应不稳固，且对变量口径、样本设定和识别设计较为敏感，现有证据不足以支持无条件的强因果结论。",
+        "总括结论口径",
+        failures,
+    )
+    expect(
+        thesis,
+        "由于本文给出的是关于条件相关及其敏感性的证据，而非已被稳健识别的因果效应，下列建议更适合作为治理启示，而非直接的政策因果处方。",
+        "政策建议口径",
+        failures,
+    )
+    expect(
+        thesis,
+        "附录表A-1进一步比较了最终保留样本与因治理特征、企业属性或国有企业标记变量缺失而未进入机器学习部分的样本",
+        "样本收缩附录引用",
+        failures,
+    )
+    expect(thesis, "### 附录表A-1 保留样本与删除样本的关键变量比较", "附录表标题", failures)
+    expect(
+        thesis,
+        f"保留样本指机器学习部分最终使用的{fmt_int(retention['keep_n'])}个公司年度观测；删除样本指在{fmt_int(sample_map['关键变量完整样本']['observations'])}个关键变量完整样本中，因治理特征、企业属性或国有企业标记变量缺失而未进入机器学习部分的{fmt_int(retention['drop_n'])}个观测。",
+        "附录表样本量说明",
+        failures,
+    )
+    appendix_rows = [
+        ("高管超额薪酬（Overpay）", "Overpay"),
+        ("财政补贴强度（lnSubsidy）", "lnSubsidy"),
+        ("盈利能力（Roa）", "Roa"),
+        ("财务杠杆（Lever）", "Lever"),
+        ("第一大股东持股比例（Top1，%）", "Top1"),
+        ("企业规模（lnSale）", "lnSale"),
+    ]
+    for label, key in appendix_rows:
+        stats = retention["summary"][key]
+        expect(
+            thesis,
+            f"| {label} | {fmt_fixed(stats['keep_mean'])} | {fmt_fixed(stats['keep_median'])} | {fmt_fixed(stats['drop_mean'])} | {fmt_fixed(stats['drop_median'])} | {fmt_fixed(stats['diff'])} | {fmt_p_cell(stats['p_value'])} |",
+            f"附录表行 {label}",
+            failures,
+        )
     expect(thesis, f"XGBoost 回归的测试集 $R^2$ 仅为{fmt_plain(model_map['XGBoost']['测试集R²'])}，分类模型的 ROC-AUC 约为{fmt_plain(clf_map['XGBoostClassifier']['ROC_AUC'], 3)}", "结论机器学习值", failures)
 
     stale_values = [
@@ -302,7 +499,7 @@ def main() -> int:
         "74.88%", "0.1037", "0.6228", "0.138", "1.52", "1.22",
         "0.126", "0.1651", "0.000053", "7.06%", "基于FA的五维综合得分",
         "表4-6 工具变量（FE-2SLS）估计结果", "Partial R² 为0.0019，说明工具变量具有统计相关性但解释力度有限。",
-        "data:image/png;base64", "�",
+        "增强shift-share", "province\\_l3", "province_l3", "data:image/png;base64", "�",
     ]
     for value in stale_values:
         expect_absent(thesis_raw, value, "旧值或污染残留", failures)

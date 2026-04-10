@@ -13,12 +13,12 @@
     "t_stat": 0.5372174377126862
   },
   "iv": {
-    "sample_size": 38620,
-    "first_stage_coef": 0.5628514200277037,
-    "partial_r2": 0.013002155109343883,
-    "partial_f": 77.74384222218615,
-    "second_stage_coef": -0.023280708124392896,
-    "second_stage_t": -2.158773363437388
+    "sample_size": 38624,
+    "first_stage_coef": 0.5655383344854529,
+    "partial_r2": 0.01313655212159981,
+    "partial_f": 78.66598537930031,
+    "second_stage_coef": -0.022649546194590066,
+    "second_stage_t": -2.116262612847502
   },
   "iv_benchmark": {
     "spec_name": "基准工具变量",
@@ -56,17 +56,51 @@
     "spec_name": "精炼双工具变量",
     "role": "refined",
     "instrument_desc": "滞后一期同行业同年排除本省平均补助 + 同省同行业同年排除本市平均补助",
-    "sample_size": 38620,
-    "n_clusters": 4516,
-    "partial_r2": 0.013002155109343883,
-    "partial_f": 77.74384222218615,
-    "second_stage_coef": -0.023280708124392896,
-    "second_stage_se": 0.01078422984028454,
-    "second_stage_t": -2.158773363437388,
-    "second_stage_p": 0.03086775394303487,
-    "overid_p": 0.040235319302277306,
-    "overid_wooldridge_p": 0.04989667164319456,
-    "wu_hausman_p": 9.965624252483707e-07
+    "sample_size": 38624,
+    "n_clusters": 4518,
+    "partial_r2": 0.01313655212159981,
+    "partial_f": 78.66598537930031,
+    "second_stage_coef": -0.022649546194590066,
+    "second_stage_se": 0.010702616044477744,
+    "second_stage_t": -2.116262612847502,
+    "second_stage_p": 0.034322478629415176,
+    "overid_p": 0.03398195485238287,
+    "overid_wooldridge_p": 0.043067941905229334,
+    "wu_hausman_p": 1.5885917015179274e-06
+  },
+  "iv_shiftshare_single": {
+    "spec_name": "增强shift-share单工具",
+    "role": "shiftshare_single",
+    "instrument_desc": "企业早期补贴暴露度 × 全国（排除本省）行业补贴增量",
+    "fe_label": "公司固定效应 + 年份固定效应",
+    "sample_size": 48897,
+    "n_clusters": 5035,
+    "partial_r2": 0.0001286055422394794,
+    "partial_f": 4.14509858287725,
+    "second_stage_coef": 0.14451960484969195,
+    "second_stage_se": 0.08345229572367546,
+    "second_stage_t": 1.7317630820872871,
+    "second_stage_p": 0.08331575380346923,
+    "overid_p": NaN,
+    "overid_wooldridge_p": NaN,
+    "wu_hausman_p": 0.0005182253989302055
+  },
+  "iv_shiftshare_double": {
+    "spec_name": "增强shift-share双工具",
+    "role": "shiftshare_double",
+    "instrument_desc": "省—行业正补助暴露度 × 全国（排除本省）行业补贴增量 + 企业早期补贴暴露度 × 全国（排除本省）行业补贴增量",
+    "fe_label": "公司固定效应 + 年份固定效应",
+    "sample_size": 46537,
+    "n_clusters": 4817,
+    "partial_r2": 0.00021913481321200745,
+    "partial_f": 5.217102588404875,
+    "second_stage_coef": 0.0926650844687078,
+    "second_stage_se": 0.05916090593667125,
+    "second_stage_t": 1.5663229458977703,
+    "second_stage_p": 0.11727303179751014,
+    "overid_p": 0.27243790168415627,
+    "overid_wooldridge_p": 0.3632974218475743,
+    "wu_hausman_p": 0.0038956325882745224
   },
   "heckman": {
     "selection_sample_size": 45396,
@@ -84,6 +118,8 @@
   "placebo": {
     "未来一期补贴安慰剂": {
       "key_var": "lnSubsidy_f1",
+      "fe_mode": "entity_time",
+      "fe_label": "公司固定效应 + 年份固定效应",
       "coef": 0.0018211433946092284,
       "se": 0.0009225498246537334,
       "t_value": 1.9740325627320672,
@@ -94,6 +130,8 @@
     },
     "未来两期补贴安慰剂": {
       "key_var": "lnSubsidy_f2",
+      "fe_mode": "entity_time",
+      "fe_label": "公司固定效应 + 年份固定效应",
       "coef": 0.0023798609573284974,
       "se": 0.0009453695282371421,
       "t_value": 2.5173869965602687,
@@ -103,6 +141,88 @@
       "r_squared": 0.012960272901250236
     }
   },
+  "placebo_fe_comparison": [
+    {
+      "check_item": "未来一期补贴安慰剂",
+      "key_var": "lnSubsidy_f1",
+      "fe_mode": "entity_time",
+      "fe_label": "公司固定效应 + 年份固定效应",
+      "coef": 0.0018211433946092284,
+      "se": 0.0009225498246537334,
+      "t_value": 1.9740325627320672,
+      "p_value": 0.048384440297341014,
+      "sample_size": 47994,
+      "n_clusters": 5036,
+      "r_squared": 0.014015765348584508
+    },
+    {
+      "check_item": "未来两期补贴安慰剂",
+      "key_var": "lnSubsidy_f2",
+      "fe_mode": "entity_time",
+      "fe_label": "公司固定效应 + 年份固定效应",
+      "coef": 0.0023798609573284974,
+      "se": 0.0009453695282371421,
+      "t_value": 2.5173869965602687,
+      "p_value": 0.011826920921328199,
+      "sample_size": 43253,
+      "n_clusters": 4793,
+      "r_squared": 0.012960272901250236
+    },
+    {
+      "check_item": "未来一期补贴安慰剂",
+      "key_var": "lnSubsidy_f1",
+      "fe_mode": "entity_industry_year",
+      "fe_label": "公司固定效应 + 行业×年份固定效应",
+      "coef": 0.0016878364197958867,
+      "se": 0.0008852193982608203,
+      "t_value": 1.9066871140781125,
+      "p_value": 0.05656783561638146,
+      "sample_size": 47994,
+      "n_clusters": 5036,
+      "r_squared": 0.014946569518827224
+    },
+    {
+      "check_item": "未来两期补贴安慰剂",
+      "key_var": "lnSubsidy_f2",
+      "fe_mode": "entity_industry_year",
+      "fe_label": "公司固定效应 + 行业×年份固定效应",
+      "coef": 0.002141884579398981,
+      "se": 0.0009120817137324999,
+      "t_value": 2.3483472447153617,
+      "p_value": 0.01886201112485386,
+      "sample_size": 43253,
+      "n_clusters": 4793,
+      "r_squared": 0.01387500490824134
+    }
+  ],
+  "main_fe_comparison": [
+    {
+      "fe_mode": "entity_time",
+      "fe_label": "公司固定效应 + 年份固定效应",
+      "coef": 0.00046671445143639935,
+      "se": 0.0008687626623281854,
+      "t_value": 0.5372174377126862,
+      "p_value": 0.5911201034772877,
+      "sample_size": 49755,
+      "n_clusters": 5062,
+      "r_squared": 0.014887312579939027,
+      "f_stat": 44.012679346893044,
+      "f_p_value": 0.0
+    },
+    {
+      "fe_mode": "entity_industry_year",
+      "fe_label": "公司固定效应 + 行业×年份固定效应",
+      "coef": 0.0004483805676181302,
+      "se": 0.0008374082978661429,
+      "t_value": 0.5354384101049383,
+      "p_value": 0.5923494219013654,
+      "sample_size": 49755,
+      "n_clusters": 5062,
+      "r_squared": 0.015944475924952517,
+      "f_stat": 51.225980910901946,
+      "f_p_value": 0.0
+    }
+  ],
   "event_study": {
     "threshold_quantile": 0.75,
     "threshold_value": 34978824.08,

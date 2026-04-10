@@ -438,15 +438,30 @@ def build_mediation_table_docx(doc, df):
 
 
 def build_causal_table_docx(doc, main_results):
-    """表4 工具变量与 Heckman 两阶段结果。"""
+    """表4 内生性识别与 Heckman 两阶段结果。"""
     iv_checks = main_results.get("iv_checks", {})
     iv_df = iv_checks.get("iv_comparison", pd.DataFrame()).copy()
+    shiftshare_df = iv_checks.get("shiftshare_checks", {}).get("shiftshare_comparison", pd.DataFrame()).copy()
     heckman = iv_checks.get("heckman_result", {})
-    add_table_title(doc, "表4  工具变量与 Heckman 两阶段结果")
+    add_table_title(doc, "表4  内生性识别与 Heckman 两阶段结果")
 
     rows = []
     if not iv_df.empty:
         for _, row in iv_df.iterrows():
+            stat_text = f"F={row['partial_f']:.2f}"
+            if pd.notna(row.get("overid_p", np.nan)):
+                stat_text += f"; OverID p={row['overid_p']:.3f}"
+            rows.append(
+                (
+                    row["spec_name"],
+                    row["instrument_desc"],
+                    stat_text,
+                    f"{format_coef(row['second_stage_coef'], row['second_stage_p'])}; t={row['second_stage_t']:.4f}",
+                    str(int(row["sample_size"])),
+                )
+            )
+    if not shiftshare_df.empty:
+        for _, row in shiftshare_df.iterrows():
             stat_text = f"F={row['partial_f']:.2f}"
             if pd.notna(row.get("overid_p", np.nan)):
                 stat_text += f"; OverID p={row['overid_p']:.3f}"
@@ -482,7 +497,7 @@ def build_causal_table_docx(doc, main_results):
             set_cell_text(table.cell(row_idx, col_idx), value, alignment=align)
 
     apply_three_line_style(table, header_rows=1)
-    add_table_note(doc, "注：前三行为公司固定效应 + 年份固定效应的 FE-2SLS 比较。基准工具变量为滞后一期同城同年其他企业平均补助；简单替代工具变量为滞后一期同行业同年其他企业平均补助；精炼双工具变量为“同行业同年排除本省平均补助”与“同省同行业同年排除本市平均补助”。Heckman 两步法仅用于 `lnSubsidy_pos_l1` 的正补助样本选择校正，第二阶段仍控制 Roa、Lever、Top1 以及公司和年份固定效应。")
+    add_table_note(doc, "注：前三行为公司固定效应 + 年份固定效应的 FE-2SLS 比较；其后两行为公司固定效应 + 行业×年份固定效应下的 shift-share Bartik 识别。增强 shift-share 工具变量以预定暴露度（企业早期补贴暴露度或省—行业早期正补助暴露度）与全国（排除本省）行业补贴年度增量的交互项构造。Heckman 两步法仅用于 `lnSubsidy_pos_l1` 的正补助样本选择校正，第二阶段仍控制 Roa、Lever、Top1 以及公司和年份固定效应。")
 
 
 def build_subsample_table_docx(doc, df, title, group_specs):

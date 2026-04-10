@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
-from scipy import stats
+from scipy import stats, linalg
 from statsmodels.multivariate.factor import Factor
 from statsmodels.stats.diagnostic import het_breuschpagan
 from statsmodels.stats.multitest import multipletests
@@ -122,6 +122,7 @@ ALT_SUBSIDY_COL = "lnSubsidy_pos"
 ALT_SUBSIDY_LAG_COL = "lnSubsidy_pos_l1"
 EVENT_STUDY_THRESHOLD_QUANTILE = 0.75
 EVENT_STUDY_WINDOW = 3
+SHIFT_SHARE_BASE_YEARS = (2003, 2004, 2005, 2006)
 SPECIAL_TREATMENT_PREFIX_PATTERN = re.compile(
     r"^(?:[A-Z]+)?(?:S\*ST|\*ST|SST|PT|ST)",
     re.IGNORECASE,
@@ -261,6 +262,101 @@ def _build_province_industry_excluding_city_mean(df, output_col, value_col=BASE_
             if adjusted_count > 0:
                 values.at[idx] = adjusted_sum / adjusted_count
     df[output_col] = values
+    return df
+
+
+def _build_shiftshare_bartik_instruments(
+    df,
+    value_col=BASE_SUBSIDY_COL,
+    amount_col="SubsidyAmount",
+    base_years=SHIFT_SHARE_BASE_YEARS,
+):
+    """构造基于既有材料的 shift-share Bartik 工具变量。
+
+    思路：
+      1. 预定暴露度（share）使用早期样本固定暴露，避免与当前误差项同步决定。
+      2. 外部冲击（shift）使用“全国排除本省”的行业补贴均值年度增量。
+      3. 最终工具变量为 share × shift，并进一步滞后一期以对齐 lnSubsidy_l1。
+    """
+    base = df[df["Year"].isin(base_years)].copy()
+    if base.empty:
+        return df
+
+    exp_pi_mean = (
+        base.groupby(["Province", "IndustrySector"])[value_col]
+        .mean()
+        .rename("SS_exp_pi_mean0406")
+        .reset_index()
+    )
+    exp_pi_pos = (
+        base.assign(_positive=(base[amount_col].fillna(0) > 0).astype(float))
+        .groupby(["Province", "IndustrySector"])["_positive"]
+        .mean()
+        .rename("SS_exp_pi_pos0406")
+        .reset_index()
+    )
+    exp_firm = (
+        df.groupby("Symbol", sort=False)
+        .head(3)
+        .groupby("Symbol")[value_col]
+        .mean()
+        .rename("SS_exp_firm_first3")
+        .reset_index()
+    )
+
+    df = df.merge(exp_pi_mean, on=["Province", "IndustrySector"], how="left")
+    df = df.merge(exp_pi_pos, on=["Province", "IndustrySector"], how="left")
+    df = df.merge(exp_firm, on="Symbol", how="left")
+
+    province_ind_year = (
+        df.groupby(["Province", "IndustrySector", "Year"])[value_col]
+        .agg(_prov_sum="sum", _prov_count="count")
+        .reset_index()
+    )
+    ind_year_total = (
+        province_ind_year.groupby(["IndustrySector", "Year"])[["_prov_sum", "_prov_count"]]
+        .sum()
+        .reset_index()
+        .rename(columns={"_prov_sum": "_total_sum", "_prov_count": "_total_count"})
+    )
+    province_ind_year = province_ind_year.merge(
+        ind_year_total,
+        on=["IndustrySector", "Year"],
+        how="left",
+    )
+    province_ind_year["SS_nat_excl_prov_ind_mean"] = np.where(
+        (province_ind_year["_total_count"] - province_ind_year["_prov_count"]) > 0,
+        (province_ind_year["_total_sum"] - province_ind_year["_prov_sum"])
+        / (province_ind_year["_total_count"] - province_ind_year["_prov_count"]),
+        np.nan,
+    )
+    province_ind_year = province_ind_year.sort_values(["Province", "IndustrySector", "Year"])
+    province_ind_year["SS_nat_excl_prov_ind_mean_l1"] = (
+        province_ind_year.groupby(["Province", "IndustrySector"])["SS_nat_excl_prov_ind_mean"].shift(1)
+    )
+    province_ind_year["SS_nat_excl_prov_ind_growth"] = (
+        province_ind_year["SS_nat_excl_prov_ind_mean"]
+        - province_ind_year["SS_nat_excl_prov_ind_mean_l1"]
+    )
+
+    df = df.merge(
+        province_ind_year[
+            ["Province", "IndustrySector", "Year", "SS_nat_excl_prov_ind_growth"]
+        ],
+        on=["Province", "IndustrySector", "Year"],
+        how="left",
+    )
+
+    exposure_cols = [
+        "SS_exp_pi_mean0406",
+        "SS_exp_pi_pos0406",
+        "SS_exp_firm_first3",
+    ]
+    for exp_col in exposure_cols:
+        inst_col = f"IV_{exp_col}_x_growth"
+        df[inst_col] = df[exp_col] * df["SS_nat_excl_prov_ind_growth"]
+        df[f"{inst_col}_l1"] = df.groupby("Symbol")[inst_col].shift(1)
+
     return df
 
 
@@ -793,6 +889,32 @@ def construct_variables(df):
     # 保留旧字段名兼容既有导出与校验逻辑
     df["IV_lnSubsidy"] = df["IV_city_year"]
     df["IV_lnSubsidy_l1"] = df["IV_city_year_l1"]
+
+    # Bartik shift-share 工具变量：全国（非本省）行业补贴增量
+    # IV_{i,t} = 行业j全国均值(t-1) - 行业j全国均值(t-2)
+    # 识别逻辑：全国行业政策强度的外生年度变化会传导到个体企业当期补贴，
+    # 但两三年前的行业政策周期不直接影响当期高管超额薪酬（排除限制）
+    _ind_nat = (
+        df.groupby(["IndustrySector", "Year"])[BASE_SUBSIDY_COL]
+        .mean()
+        .reset_index(name="_ind_nat_mean")
+        .sort_values(["IndustrySector", "Year"])
+    )
+    _ind_nat["_ind_nat_l1"] = _ind_nat.groupby("IndustrySector")["_ind_nat_mean"].shift(1)
+    _ind_nat["_ind_nat_l2"] = _ind_nat.groupby("IndustrySector")["_ind_nat_mean"].shift(2)
+    _ind_nat["IV_bartik_ind_growth"] = _ind_nat["_ind_nat_l1"] - _ind_nat["_ind_nat_l2"]
+    _bartik_map = (
+        _ind_nat.set_index(["IndustrySector", "Year"])["IV_bartik_ind_growth"].to_dict()
+    )
+    df["IV_bartik_ind_growth_l1"] = df.apply(
+        lambda row: _bartik_map.get(
+            (row.get("IndustrySector"), row.get("Year")), np.nan
+        ),
+        axis=1,
+    )
+
+    # 基于现有材料补充更规范的 shift-share Bartik 候选工具变量
+    df = _build_shiftshare_bartik_instruments(df)
 
     # Heckman 选择方程用到的正补助占比（留一法）
     df = _build_leave_one_out_positive_share(df, ["City", "Year"], "SubsidyAmount", "IV_city_posshare")
@@ -1430,8 +1552,39 @@ def _build_fe_matrix(df_subset, core_vars):
     X = sm.add_constant(X)
     return X, 0, 0
 
-def _fit_with_cluster_se(y, X, groups=None):
-    """PanelOLS 回归 + 公司固定效应 + 年份固定效应 + 公司层面聚类稳健标准误"""
+def _build_industry_year_effects(df_subset):
+    """构造行业×年份固定效应编码。"""
+    effect_df = pd.DataFrame(
+        {
+            "IndustryYearFE": (
+                df_subset["IndustrySector"].astype(str)
+                + "__"
+                + df_subset["Year"].astype(int).astype(str)
+            )
+        },
+        index=df_subset.index,
+    )
+    return effect_df
+
+
+def _drop_collinear_effect_columns(effect_df, tol=1e-10):
+    """剔除完全共线的效应虚拟变量，避免 IV 估计因秩不足报错。"""
+    if effect_df is None or effect_df.empty:
+        return effect_df, []
+    arr = effect_df.to_numpy(dtype=float)
+    if arr.shape[1] <= 1:
+        return effect_df, []
+    _, r_mat, piv = linalg.qr(arr, mode="economic", pivoting=True)
+    diag = np.abs(np.diag(r_mat))
+    rank = int(np.sum(diag > tol))
+    keep_idx = set(int(idx) for idx in piv[:rank])
+    keep_cols = [col for idx, col in enumerate(effect_df.columns) if idx in keep_idx]
+    dropped_cols = [col for idx, col in enumerate(effect_df.columns) if idx not in keep_idx]
+    return effect_df[keep_cols].copy(), dropped_cols
+
+
+def _fit_with_cluster_se(y, X, groups=None, time_effects=True, other_effects=None):
+    """PanelOLS 回归 + 固定效应 + 公司层面聚类稳健标准误。"""
     if isinstance(X, pd.DataFrame):
         X = pd.DataFrame(
             X.to_numpy(dtype=float),
@@ -1450,7 +1603,8 @@ def _fit_with_cluster_se(y, X, groups=None):
         y,
         X,
         entity_effects=True,
-        time_effects=True,
+        time_effects=time_effects,
+        other_effects=other_effects,
         drop_absorbed=True,
         check_rank=False,
     )
@@ -1497,7 +1651,7 @@ def _print_core_results(model, core_vars, n_ind, n_year, sample_size, n_clusters
         print(f"F 统计量 = {f_stat:.2f} (p={_format_pvalue(f_pval)})")
 
 
-def _fit_model2(df_sub, control_vars, subsidy_col=BASE_SUBSIDY_LAG_COL):
+def _fit_model2(df_sub, control_vars, subsidy_col=BASE_SUBSIDY_LAG_COL, fe_mode="entity_time"):
     """在给定样本上拟合模型2主回归。"""
     core_vars = [subsidy_col] + control_vars
     needed = core_vars + ["Overpay", "IndustrySector", "Year"]
@@ -1508,7 +1662,19 @@ def _fit_model2(df_sub, control_vars, subsidy_col=BASE_SUBSIDY_LAG_COL):
     groups = sub["Symbol"]
     sub = sub.set_index(["Symbol", "Year"], drop=False)
     x, n_ind, n_year = _build_fe_matrix(sub, core_vars)
-    model = _fit_with_cluster_se(sub["Overpay"], x)
+    other_effects = None
+    time_effects = True
+    fe_label = "公司固定效应 + 年份固定效应"
+    if fe_mode == "entity_industry_year":
+        other_effects = _build_industry_year_effects(sub)
+        time_effects = False
+        fe_label = "公司固定效应 + 行业×年份固定效应"
+    model = _fit_with_cluster_se(
+        sub["Overpay"],
+        x,
+        time_effects=time_effects,
+        other_effects=other_effects,
+    )
     return {
         "model": model,
         "sample_size": int(len(sub)),
@@ -1516,6 +1682,8 @@ def _fit_model2(df_sub, control_vars, subsidy_col=BASE_SUBSIDY_LAG_COL):
         "n_ind": n_ind,
         "n_year": n_year,
         "df": sub,
+        "fe_mode": fe_mode,
+        "fe_label": fe_label,
     }
 
 
@@ -1547,19 +1715,40 @@ def _fit_iv_with_fe(
     dep_var="Overpay",
     endog_col=BASE_SUBSIDY_LAG_COL,
     instrument_col="IV_lnSubsidy_l1",
+    fe_mode="entity_time",
 ):
-    """以公司内去均值 + 年份虚拟变量的方式实现 FE-2SLS。"""
+    """以公司内去均值 + 固定效应虚拟变量的方式实现 FE-2SLS。"""
     instrument_cols = _as_list(instrument_col)
     needed = [dep_var, endog_col, "Symbol", "Year"] + control_vars + instrument_cols
+    if fe_mode == "entity_industry_year":
+        needed.append("IndustrySector")
     df_iv = df.dropna(subset=needed).copy()
     if len(df_iv) < 100:
         return None
 
-    year_dummies = pd.get_dummies(df_iv["Year"], prefix="Year", drop_first=True, dtype=float)
+    if fe_mode == "entity_industry_year":
+        effect_codes = (
+            df_iv["IndustrySector"].astype(str)
+            + "__"
+            + df_iv["Year"].astype(int).astype(str)
+        )
+        effect_dummies = pd.get_dummies(
+            effect_codes,
+            prefix="IY",
+            drop_first=True,
+            dtype=float,
+        )
+        fe_label = "公司固定效应 + 行业×年份固定效应"
+    else:
+        effect_dummies = pd.get_dummies(df_iv["Year"], prefix="Year", drop_first=True, dtype=float)
+        fe_label = "公司固定效应 + 年份固定效应"
+
+    effect_dummies, dropped_effect_cols = _drop_collinear_effect_columns(effect_dummies)
+
     base = pd.concat(
         [
             df_iv[["Symbol", "Year", dep_var, endog_col] + control_vars + instrument_cols].reset_index(drop=True),
-            year_dummies.reset_index(drop=True),
+            effect_dummies.reset_index(drop=True),
         ],
         axis=1,
     )
@@ -1570,19 +1759,21 @@ def _fit_iv_with_fe(
     transformed = base.copy()
     transformed[value_cols] = base[value_cols] - entity_means
 
-    exog_cols = control_vars + list(year_dummies.columns)
+    exog_df = transformed[control_vars + list(effect_dummies.columns)].copy()
+    exog_df, dropped_exog_cols = _drop_collinear_effect_columns(exog_df)
+    exog_cols = list(exog_df.columns)
     clusters = df_iv["Symbol"].reset_index(drop=True)
 
     iv_model = IV2SLS(
         dependent=transformed[dep_var],
-        exog=transformed[exog_cols],
+        exog=exog_df,
         endog=transformed[endog_col],
         instruments=transformed[instrument_cols],
     ).fit(cov_type="clustered", clusters=clusters)
 
     first_stage_ols = sm.OLS(
         transformed[endog_col],
-        transformed[exog_cols + instrument_cols],
+        pd.concat([exog_df, transformed[instrument_cols]], axis=1),
     ).fit(cov_type="cluster", cov_kwds={"groups": clusters})
 
     diagnostics = iv_model.first_stage.diagnostics.loc[endog_col]
@@ -1599,7 +1790,10 @@ def _fit_iv_with_fe(
         "model": iv_model,
         "sample_size": int(len(df_iv)),
         "n_clusters": int(df_iv["Symbol"].nunique()),
-        "year_fe_count": int(len(year_dummies.columns)),
+        "fe_mode": fe_mode,
+        "fe_label": fe_label,
+        "effect_fe_count": int(len(effect_dummies.columns)),
+        "dropped_effect_cols": dropped_effect_cols + dropped_exog_cols,
         "instrument_cols": instrument_cols,
         "instrument_label": " + ".join(instrument_cols),
         "first_stage": {
@@ -1617,6 +1811,93 @@ def _fit_iv_with_fe(
         "overid_wooldridge": _extract_test_result(getattr(iv_model, "wooldridge_overid", None)),
         "wu_hausman": _extract_test_result(iv_model.wu_hausman()),
     }
+
+
+def _build_lewbel_instruments(df, control_vars, endog_col=BASE_SUBSIDY_LAG_COL, dep_var="Overpay"):
+    """构造 Lewbel (2012) 异方差内生工具变量。
+
+    步骤：
+    1. 对内生变量做辅助 OLS 回归（控制变量 + 年份虚拟变量），得到残差 v̂
+    2. 对每个控制变量 z_k，计算 (z_k - z̄_k) × v̂，即对中控制变量与残差的乘积
+    3. 这些乘积满足 Lewbel 排他性条件（在 E[z·v]=0 且条件异方差存在时有效）
+    返回：包含工具变量列的 DataFrame，与传入 df 行对齐（用 NaN 填充缺失）。
+    """
+    needed = [endog_col, "Year"] + control_vars
+    # 保留原始索引以便最后对齐
+    valid_mask = df[needed].notna().all(axis=1)
+    df_lew = df.loc[valid_mask, needed + ["Year"]].copy()
+    orig_index = df_lew.index  # 原始行标签
+    if len(df_lew) < 200:
+        return None, []
+
+    df_lew_reset = df_lew.reset_index(drop=True)
+    year_d = pd.get_dummies(df_lew_reset["Year"], prefix="YD", drop_first=True, dtype=float)
+    # 清除 attrs 以避免 pandas concat 时的 "ambiguous truth value" 错误
+    ctrl_df = df_lew_reset[control_vars].astype(float).copy()
+    ctrl_df.attrs = {}
+    year_d.attrs = {}
+    Z = pd.concat([ctrl_df, year_d], axis=1)
+    Z = sm.add_constant(Z)
+    ols_res = sm.OLS(df_lew_reset[endog_col].astype(float), Z).fit()
+    vhat = ols_res.resid.values
+
+    iv_names = []
+    iv_data = {}
+    for col in control_vars:
+        vals = df_lew_reset[col].astype(float).values
+        centered = vals - vals.mean()
+        iv_col = f"IV_lewbel_{col}"
+        iv_data[iv_col] = centered * vhat
+        iv_names.append(iv_col)
+
+    # 对齐回原始 df 的行标签
+    result = pd.DataFrame(np.nan, index=df.index, columns=iv_names, dtype=float)
+    for col in iv_names:
+        result.loc[orig_index, col] = iv_data[col]
+    return result, iv_names
+
+
+def _fit_iv_lewbel(df, control_vars, dep_var="Overpay", endog_col=BASE_SUBSIDY_LAG_COL):
+    """使用 Lewbel (2012) 异方差内生工具变量估计 FE-2SLS。
+
+    在没有合适外部工具变量时，利用控制变量去中心化后与一阶段残差的乘积
+    作为工具变量，要求存在条件异方差（即控制变量与残差平方相关）。
+    """
+    iv_df, iv_names = _build_lewbel_instruments(df, control_vars, endog_col=endog_col, dep_var=dep_var)
+    if iv_df is None or not iv_names:
+        return None
+
+    # 将 Lewbel IVs 合并到 df
+    df_aug = df.copy()
+    for col in iv_names:
+        df_aug[col] = iv_df[col].values
+
+    # 由于 Lewbel IVs 可能存在共线性，做 PCA 降维保留解释力最强的前3个方向
+    needed = [dep_var, endog_col, "Symbol", "Year"] + control_vars + iv_names
+    df_fit = df_aug.dropna(subset=needed).copy().reset_index(drop=True)
+    if len(df_fit) < 200:
+        return None
+
+    from sklearn.decomposition import PCA as _PCA
+    iv_mat = df_fit[iv_names].values
+    n_components = min(3, iv_mat.shape[1])
+    pca_iv = _PCA(n_components=n_components).fit_transform(iv_mat)
+    pca_iv_cols = [f"IV_lewbel_pc{k+1}" for k in range(n_components)]
+    for k, col in enumerate(pca_iv_cols):
+        df_fit[col] = pca_iv[:, k]
+
+    result = _fit_iv_with_fe(
+        df_fit,
+        control_vars,
+        dep_var=dep_var,
+        endog_col=endog_col,
+        instrument_col=pca_iv_cols,
+        fe_mode="entity_time",
+    )
+    if result is not None:
+        result["lewbel_n_instruments"] = len(iv_names)
+        result["lewbel_pca_components"] = n_components
+    return result
 
 
 def _fit_heckman_two_step(
@@ -1692,8 +1973,109 @@ def _fit_heckman_two_step(
     }
 
 
+def _build_main_fe_comparison(df, control_vars):
+    """比较双向固定效应与公司+行业×年份固定效应下的主回归。"""
+    rows = []
+    for fe_mode in ["entity_time", "entity_industry_year"]:
+        fit_result = _fit_model2(df, control_vars, fe_mode=fe_mode)
+        if fit_result is None:
+            continue
+        model = fit_result["model"]
+        f_stat, f_pval = _get_model_fstat(model)
+        rows.append({
+            "fe_mode": fe_mode,
+            "fe_label": fit_result.get("fe_label", ""),
+            "coef": float(model.params.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "se": float(model.std_errors.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "t_value": float(model.tstats.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "p_value": float(model.pvalues.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "sample_size": int(fit_result["sample_size"]),
+            "n_clusters": int(fit_result["n_clusters"]),
+            "r_squared": float(model.rsquared),
+            "f_stat": float(f_stat),
+            "f_p_value": float(f_pval),
+        })
+    return pd.DataFrame(rows)
+
+
+def _run_shiftshare_identification(df, control_vars):
+    """运行增强 shift-share Bartik 识别。
+
+    注意：shift-share IV 的"移位"分量（全国行业补贴年度增量）是行业-年份层面的变量，
+    若控制行业×年份 FE 则会完全吸收该变量，导致第一阶段失效。
+    因此此处统一使用公司 FE + 年份 FE（entity_time），不使用 entity_industry_year。
+    """
+    specs = [
+        {
+            "spec_name": "增强shift-share单工具",
+            "role": "shiftshare_single",
+            "instrument_cols": ["IV_SS_exp_firm_first3_x_growth_l1"],
+            "instrument_desc": "企业早期补贴暴露度 × 全国（排除本省）行业补贴增量",
+        },
+        {
+            "spec_name": "增强shift-share双工具",
+            "role": "shiftshare_double",
+            "instrument_cols": ["IV_SS_exp_pi_pos0406_x_growth_l1", "IV_SS_exp_firm_first3_x_growth_l1"],
+            "instrument_desc": "省—行业正补助暴露度 × 全国（排除本省）行业补贴增量 + 企业早期补贴暴露度 × 全国（排除本省）行业补贴增量",
+        },
+    ]
+
+    rows = []
+    results = []
+    for spec in specs:
+        try:
+            result = _fit_iv_with_fe(
+                df,
+                control_vars,
+                instrument_col=spec["instrument_cols"],
+                fe_mode="entity_time",
+            )
+        except Exception:
+            result = None
+        if result is None:
+            continue
+        result["spec_name"] = spec["spec_name"]
+        result["role"] = spec["role"]
+        result["instrument_desc"] = spec["instrument_desc"]
+        results.append(result)
+        model = result["model"]
+        rows.append({
+            "spec_name": spec["spec_name"],
+            "role": spec["role"],
+            "instrument_desc": spec["instrument_desc"],
+            "fe_label": result.get("fe_label", ""),
+            "sample_size": result["sample_size"],
+            "n_clusters": result["n_clusters"],
+            "partial_r2": float(result["first_stage"]["partial_r2"]),
+            "partial_f": float(result["first_stage"]["f_stat"]),
+            "second_stage_coef": float(model.params.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "second_stage_se": float(model.std_errors.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "second_stage_t": float(model.tstats.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "second_stage_p": float(model.pvalues.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "overid_p": float(result["overid"]["pval"]) if result.get("overid") else np.nan,
+            "overid_wooldridge_p": float(result["overid_wooldridge"]["pval"]) if result.get("overid_wooldridge") else np.nan,
+            "wu_hausman_p": float(result["wu_hausman"]["pval"]) if result.get("wu_hausman") else np.nan,
+        })
+
+    comparison_df = pd.DataFrame(rows)
+    single_result = next((row for row in results if row.get("role") == "shiftshare_single"), None)
+    double_result = next((row for row in results if row.get("role") == "shiftshare_double"), None)
+    return {
+        "shiftshare_single_result": single_result,
+        "shiftshare_double_result": double_result,
+        "shiftshare_comparison": comparison_df,
+    }
+
+
 def _run_endogeneity_checks(df, control_vars):
     """比较不同工具变量，并对正补助口径实施 Heckman 两步校正。"""
+    # 构造三期滞后省均值（若尚未存在）
+    if "IV_province_year_l3" not in df.columns:
+        if "IV_province_year" not in df.columns:
+            df = _build_leave_one_out_mean(df, ["Province", "Year"], BASE_SUBSIDY_COL, "IV_province_year")
+        df["IV_province_year_l2"] = df.groupby("Symbol")["IV_province_year"].shift(2)
+        df["IV_province_year_l3"] = df.groupby("Symbol")["IV_province_year"].shift(3)
+
     iv_specs = [
         {
             "spec_name": "基准工具变量",
@@ -1713,11 +2095,20 @@ def _run_endogeneity_checks(df, control_vars):
             "instrument_cols": ["IV_industry_excl_province_l1", "IV_province_industry_excl_city_l1"],
             "instrument_desc": "滞后一期同行业同年排除本省平均补助 + 同省同行业同年排除本市平均补助",
         },
+        {
+            "spec_name": "三期滞后省均值工具变量",
+            "role": "province_l3",
+            "instrument_cols": ["IV_province_year_l3"],
+            "instrument_desc": "滞后三期同省同年其他企业平均补助（深度滞后，减弱反向因果）",
+        },
     ]
 
     iv_results = []
     comparison_rows = []
     for spec in iv_specs:
+        # 过滤掉缺列的 spec
+        if any(col not in df.columns for col in spec["instrument_cols"]):
+            continue
         result = _fit_iv_with_fe(df, control_vars, instrument_col=spec["instrument_cols"])
         if result is None:
             continue
@@ -1743,22 +2134,65 @@ def _run_endogeneity_checks(df, control_vars):
             "wu_hausman_p": float(result["wu_hausman"]["pval"]) if result.get("wu_hausman") else np.nan,
         })
 
+    # Lewbel (2012) 异方差内生工具变量（不依赖外部工具）
+    print("  构造 Lewbel (2012) 异方差内生工具变量...")
+    lewbel_result = None
+    try:
+        lewbel_result = _fit_iv_lewbel(df, control_vars)
+    except Exception as e:
+        print(f"  Lewbel IV 估计失败: {e}")
+    if lewbel_result is not None:
+        lewbel_result["spec_name"] = "Lewbel异方差内生工具变量"
+        lewbel_result["role"] = "lewbel"
+        lewbel_result["instrument_desc"] = (
+            "Lewbel (2012) 利用控制变量与一阶段残差的乘积构造内生工具变量，"
+            f"共{lewbel_result.get('lewbel_n_instruments',0)}个原始工具、"
+            f"PCA降维至{lewbel_result.get('lewbel_pca_components',0)}个主成分"
+        )
+        iv_results.append(lewbel_result)
+        lm = lewbel_result["model"]
+        comparison_rows.append({
+            "spec_name": lewbel_result["spec_name"],
+            "role": lewbel_result["role"],
+            "instrument_desc": lewbel_result["instrument_desc"],
+            "sample_size": lewbel_result["sample_size"],
+            "n_clusters": lewbel_result["n_clusters"],
+            "partial_r2": float(lewbel_result["first_stage"]["partial_r2"]),
+            "partial_f": float(lewbel_result["first_stage"]["f_stat"]),
+            "second_stage_coef": float(lm.params.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "second_stage_se": float(lm.std_errors.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "second_stage_t": float(lm.tstats.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "second_stage_p": float(lm.pvalues.get(BASE_SUBSIDY_LAG_COL, np.nan)),
+            "overid_p": float(lewbel_result["overid"]["pval"]) if lewbel_result.get("overid") else np.nan,
+            "overid_wooldridge_p": float(lewbel_result["overid_wooldridge"]["pval"]) if lewbel_result.get("overid_wooldridge") else np.nan,
+            "wu_hausman_p": float(lewbel_result["wu_hausman"]["pval"]) if lewbel_result.get("wu_hausman") else np.nan,
+        })
+
     comparison_df = pd.DataFrame(comparison_rows)
     refined_result = next((row for row in iv_results if row.get("role") == "refined"), None)
     benchmark_result = next((row for row in iv_results if row.get("role") == "benchmark"), None)
     simple_result = next((row for row in iv_results if row.get("role") == "simple"), None)
+    province_l3_result = next((row for row in iv_results if row.get("role") == "province_l3"), None)
     heckman_result = _fit_heckman_two_step(df, control_vars)
+    shiftshare_checks = _run_shiftshare_identification(df, control_vars)
+
+    # 选取"最优"工具变量结果用于文中报告：优先级：精炼双工具 > Lewbel > 深滞后 > 简单 > 基准
+    iv_result_primary = refined_result or lewbel_result or province_l3_result or simple_result or benchmark_result
+
     return {
         "benchmark_iv_result": benchmark_result,
         "simple_iv_result": simple_result,
         "refined_iv_result": refined_result,
-        "iv_result": refined_result or simple_result or benchmark_result,
+        "province_l3_iv_result": province_l3_result,
+        "lewbel_iv_result": lewbel_result,
+        "iv_result": iv_result_primary,
         "iv_comparison": comparison_df,
         "heckman_result": heckman_result,
+        "shiftshare_checks": shiftshare_checks,
     }
 
 
-def _run_placebo_checks(df, control_vars):
+def _run_placebo_checks(df, control_vars, fe_mode="entity_time"):
     """使用未来补贴开展安慰剂检验。"""
     placebo_specs = [
         ("未来一期补贴安慰剂", BASE_SUBSIDY_LEAD1_COL),
@@ -1766,13 +2200,15 @@ def _run_placebo_checks(df, control_vars):
     ]
     rows = []
     for label, subsidy_col in placebo_specs:
-        fit_result = _fit_model2(df, control_vars, subsidy_col=subsidy_col)
+        fit_result = _fit_model2(df, control_vars, subsidy_col=subsidy_col, fe_mode=fe_mode)
         if fit_result is None:
             continue
         model = fit_result["model"]
         rows.append({
             "check_item": label,
             "key_var": subsidy_col,
+            "fe_mode": fe_mode,
+            "fe_label": fit_result.get("fe_label", ""),
             "coef": float(model.params.get(subsidy_col, np.nan)),
             "se": float(model.std_errors.get(subsidy_col, np.nan)),
             "t_value": float(model.tstats.get(subsidy_col, np.nan)),
@@ -2240,15 +2676,28 @@ def run_regressions(df, power_diagnostics=None):
             f"IMR p={_format_pvalue(heckman_result['imr_p'])}, "
             f"补贴系数={heckman_result['subsidy_coef']:.4f} (p={_format_pvalue(heckman_result['subsidy_p'])})"
         )
+    shiftshare_comparison = endogeneity_checks.get("shiftshare_checks", {}).get("shiftshare_comparison", pd.DataFrame())
+    if isinstance(shiftshare_comparison, pd.DataFrame) and not shiftshare_comparison.empty:
+        print("\n增强识别（公司固定效应 + 年份固定效应 + shift-share Bartik）：")
+        print(shiftshare_comparison.to_string(index=False))
 
     print("\n" + "-" * 50)
     print("未来补贴安慰剂检验")
     print("-" * 50)
     placebo_df = _run_placebo_checks(df, control_vars)
+    placebo_fe_comparison = pd.concat(
+        [
+            placebo_df.copy(),
+            _run_placebo_checks(df, control_vars, fe_mode="entity_industry_year"),
+        ],
+        ignore_index=True,
+    )
     if placebo_df.empty:
         print("安慰剂样本量不足，未能完成估计。")
     else:
         print(placebo_df.to_string(index=False))
+        print("\n固定效应设定对安慰剂结果的影响：")
+        print(placebo_fe_comparison.to_string(index=False))
 
     print("\n" + "-" * 50)
     print("首次大额补贴事件研究")
@@ -2308,6 +2757,7 @@ def run_regressions(df, power_diagnostics=None):
     _print_mediation_summary(fit_result["summary"])
 
     method_comparison = _build_power_method_comparison(df, control_vars, power_diagnostics)
+    main_fe_comparison = _build_main_fe_comparison(df, control_vars)
 
     return {
         "model2": model2,
@@ -2318,10 +2768,12 @@ def run_regressions(df, power_diagnostics=None):
         "iv_result": endogeneity_checks["iv_result"],
         "iv_checks": endogeneity_checks,
         "placebo_df": placebo_df,
+        "placebo_fe_comparison": placebo_fe_comparison,
         "event_study_result": event_study_result,
         "summary": fit_result["summary"],
         "fit_result": fit_result,
         "method_comparison": method_comparison,
+        "main_fe_comparison": main_fe_comparison,
     }
 
 
@@ -2785,8 +3237,11 @@ def save_structured_outputs(
     iv_result = main_regression.get("iv_result", {})
     iv_checks = main_regression.get("iv_checks", {})
     iv_comparison = iv_checks.get("iv_comparison", pd.DataFrame())
+    shiftshare_comparison = iv_checks.get("shiftshare_checks", {}).get("shiftshare_comparison", pd.DataFrame())
     heckman_result = iv_checks.get("heckman_result", {})
     placebo_df = main_regression.get("placebo_df", pd.DataFrame())
+    placebo_fe_comparison = main_regression.get("placebo_fe_comparison", pd.DataFrame())
+    main_fe_comparison = main_regression.get("main_fe_comparison", pd.DataFrame())
     event_study_result = main_regression.get("event_study_result")
     iv_model = iv_result.get("model")
     first_stage = iv_result.get("first_stage", {})
@@ -2882,6 +3337,19 @@ def save_structured_outputs(
             os.path.join(output_dir, "iv_comparison_results.csv"),
             index=False,
         )
+    if isinstance(shiftshare_comparison, pd.DataFrame) and not shiftshare_comparison.empty:
+        shiftshare_comparison.to_csv(
+            os.path.join(output_dir, "iv_shiftshare_results.csv"),
+            index=False,
+        )
+        pd.concat(
+            [iv_comparison, shiftshare_comparison],
+            ignore_index=True,
+            sort=False,
+        ).to_csv(
+            os.path.join(output_dir, "iv_comparison_enhanced_results.csv"),
+            index=False,
+        )
     heckman_export = (
         {k: v for k, v in heckman_result.items() if k not in {"selection_model", "outcome_model"}}
         if isinstance(heckman_result, dict) and heckman_result
@@ -2895,6 +3363,16 @@ def save_structured_outputs(
     if isinstance(placebo_df, pd.DataFrame) and not placebo_df.empty:
         placebo_df.to_csv(
             os.path.join(output_dir, "placebo_results.csv"),
+            index=False,
+        )
+    if isinstance(placebo_fe_comparison, pd.DataFrame) and not placebo_fe_comparison.empty:
+        placebo_fe_comparison.to_csv(
+            os.path.join(output_dir, "placebo_fe_comparison.csv"),
+            index=False,
+        )
+    if isinstance(main_fe_comparison, pd.DataFrame) and not main_fe_comparison.empty:
+        main_fe_comparison.to_csv(
+            os.path.join(output_dir, "main_regression_fe_comparison.csv"),
             index=False,
         )
     if event_study_result is not None:
@@ -2947,11 +3425,31 @@ def save_structured_outputs(
             if isinstance(iv_comparison, pd.DataFrame) and not iv_comparison.empty and (iv_comparison["role"] == "refined").any()
             else {}
         ),
+        "iv_shiftshare_single": (
+            shiftshare_comparison.loc[shiftshare_comparison["role"] == "shiftshare_single"].iloc[0].to_dict()
+            if isinstance(shiftshare_comparison, pd.DataFrame) and not shiftshare_comparison.empty and (shiftshare_comparison["role"] == "shiftshare_single").any()
+            else {}
+        ),
+        "iv_shiftshare_double": (
+            shiftshare_comparison.loc[shiftshare_comparison["role"] == "shiftshare_double"].iloc[0].to_dict()
+            if isinstance(shiftshare_comparison, pd.DataFrame) and not shiftshare_comparison.empty and (shiftshare_comparison["role"] == "shiftshare_double").any()
+            else {}
+        ),
         "heckman": heckman_export,
         "placebo": (
             placebo_df.set_index("check_item").to_dict(orient="index")
             if isinstance(placebo_df, pd.DataFrame) and not placebo_df.empty
             else {}
+        ),
+        "placebo_fe_comparison": (
+            placebo_fe_comparison.to_dict(orient="records")
+            if isinstance(placebo_fe_comparison, pd.DataFrame) and not placebo_fe_comparison.empty
+            else []
+        ),
+        "main_fe_comparison": (
+            main_fe_comparison.to_dict(orient="records")
+            if isinstance(main_fe_comparison, pd.DataFrame) and not main_fe_comparison.empty
+            else []
         ),
         "event_study": event_study_result.get("summary", {}) if event_study_result else {},
         "vif": {

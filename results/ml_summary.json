@@ -11,22 +11,21 @@
   "train_company_count": 4051,
   "test_company_count": 1013,
   "ols_r2": 0.018028513038159777,
-  "lasso_alpha": 0.0002652948464431895,
+  "lasso_alpha": 0.0022695105366946685,
   "lasso_retained": [
     "Top1",
     "Boardsize",
-    "Lever",
     "Dual",
+    "Lever",
     "Mgshder",
     "lnSale",
     "Industry",
-    "IsSOE",
     "lnSubsidy",
+    "IsSOE",
     "Tenure",
-    "Roa",
-    "Insider",
     "IA",
-    "Zone"
+    "Roa",
+    "Insider"
   ],
   "rf_regression_r2": 0.08863768699278007,
   "rf_classification_f1": 0.5718178721471556,
@@ -48,13 +47,13 @@
     {
       "模型": "Lasso",
       "任务": "回归预测",
-      "测试集R²": 0.018026007457186743,
-      "RMSE": 0.5655724516028563,
-      "MAE": 0.4341064822604921,
-      "5折CV R²均值": 0.024623509159426904,
-      "5折CV R²标准差": 0.004554149057817587,
-      "调参方式": "LassoCV(内部KFold调参)+外层GroupKFold评估",
-      "最优参数摘要": "{\"alpha\": 0.0002652948464431895}"
+      "测试集R²": 0.017719127857323658,
+      "RMSE": 0.5656608190601075,
+      "MAE": 0.4337966094025226,
+      "5折CV R²均值": 0.02483291254061859,
+      "5折CV R²标准差": 0.004523355583270864,
+      "调参方式": "自定义alpha网格搜索(内外层均为GroupKFold)",
+      "最优参数摘要": "{\"alpha\": 0.0022695105366946685, \"alpha_search_cv_mean\": 0.02483291254061859, \"alpha_search_cv_std\": 0.004523355583270864}"
     },
     {
       "模型": "RandomForest",
