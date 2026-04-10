@@ -104,6 +104,12 @@ def expect_absent(text: str, needle: str, label: str, failures: list[str]) -> No
         failures.append(f"[残留] {label}: {needle}")
 
 
+def expect_absent_pattern(text: str, pattern: str, label: str, failures: list[str]) -> None:
+    match = re.search(pattern, text, flags=re.MULTILINE)
+    if match:
+        failures.append(f"[残留] {label}: {match.group(0)}")
+
+
 def normalize_tables(text: str) -> str:
     """把 HTML 表格中的行提取成统一的管道文本，便于一致性校验兼容 Markdown/HTML 两种写法。"""
     rows: list[str] = []
@@ -242,7 +248,6 @@ def main() -> int:
     shap_rows = read_csv_rows("shap_importance.csv")
     power_fa = read_csv_rows("power_fa_diagnostics.csv")[0]
     stage1_map = read_csv_map("stage1_results.csv", "key_var")
-    retention = compute_ml_retention_comparison()
 
     sample_chain = (
         f"原始公司—年度观测为{fmt_int(sample_map['原始公司-年观测']['observations'])}条；"
@@ -429,7 +434,7 @@ def main() -> int:
 
     expect(
         thesis,
-        "由此可见，现有识别证据尚未形成一致支持。",
+        "现有证据尚未形成一致支持",
         "摘要识别边界",
         failures,
     )
@@ -465,33 +470,21 @@ def main() -> int:
     )
     expect(
         thesis,
-        "附录表A-1进一步比较了最终保留样本与因治理特征、企业属性或国有企业标记变量缺失而未进入机器学习部分的样本",
-        "样本收缩附录引用",
+        "机器学习样本收缩主要来自治理特征、企业属性和国有企业标记变量缺失，因此第五章结果更适合作为特征更完整样本上的补充证据。",
+        "样本收缩文字说明",
         failures,
     )
-    expect(thesis, "### 附录表A-1 保留样本与删除样本的关键变量比较", "附录表标题", failures)
     expect(
         thesis,
-        f"保留样本指机器学习部分最终使用的{fmt_int(retention['keep_n'])}个公司年度观测；删除样本指在{fmt_int(sample_map['关键变量完整样本']['observations'])}个关键变量完整样本中，因治理特征、企业属性或国有企业标记变量缺失而未进入机器学习部分的{fmt_int(retention['drop_n'])}个观测。",
-        "附录表样本量说明",
+        "**ABSTRACT**",
+        "英文摘要结构",
         failures,
     )
-    appendix_rows = [
-        ("高管超额薪酬（Overpay）", "Overpay"),
-        ("财政补贴强度（lnSubsidy）", "lnSubsidy"),
-        ("盈利能力（Roa）", "Roa"),
-        ("财务杠杆（Lever）", "Lever"),
-        ("第一大股东持股比例（Top1，%）", "Top1"),
-        ("企业规模（lnSale）", "lnSale"),
-    ]
-    for label, key in appendix_rows:
-        stats = retention["summary"][key]
-        expect(
-            thesis,
-            f"| {label} | {fmt_fixed(stats['keep_mean'])} | {fmt_fixed(stats['keep_median'])} | {fmt_fixed(stats['drop_mean'])} | {fmt_fixed(stats['drop_median'])} | {fmt_fixed(stats['diff'])} | {fmt_p_cell(stats['p_value'])} |",
-            f"附录表行 {label}",
-            failures,
-        )
+    expect(thesis, "**Keywords**:", "英文关键词结构", failures)
+    expect(thesis, "## 致谢", "致谢结构", failures)
+    expect_absent(thesis_raw, "## 附录", "附录结构残留", failures)
+    expect_absent(thesis_raw, "附录表A-1", "附录表残留", failures)
+    expect_absent_pattern(thesis_raw, r"^\[\d+\]\s+", "参考文献编号后空格", failures)
     expect(thesis, f"XGBoost 回归的测试集 $R^2$ 仅为{fmt_plain(model_map['XGBoost']['测试集R²'])}，分类模型的 ROC-AUC 约为{fmt_plain(clf_map['XGBoostClassifier']['ROC_AUC'], 3)}", "结论机器学习值", failures)
 
     stale_values = [
