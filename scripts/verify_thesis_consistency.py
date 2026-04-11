@@ -365,8 +365,8 @@ def main() -> int:
     expect(thesis, f"样本使用{fmt_int(ml_summary['ml_sample_size'])}个公司年度观测", "ML 样本量", failures)
     expect(
         thesis,
-        f"训练集（{fmt_int(ml_tuning['split']['train_size'])}条）和测试集（{fmt_int(ml_tuning['split']['test_size_n'])}条）",
-        "ML 训练/测试样本量",
+        f"建模样本（{fmt_int(ml_tuning['split']['train_size'])}条）和保留样本（{fmt_int(ml_tuning['split']['test_size_n'])}条）",
+        "ML 建模/保留样本量",
         failures,
     )
     expect(
@@ -422,8 +422,20 @@ def main() -> int:
     )
     expect(
         thesis,
-        "在与机制检验一致的统一样本上，借助 Lasso、随机森林和 XGBoost 对 OLS 主回归做了补充检验：三种方法均保留了财政补贴与管理层权力变量，系数方向与OLS一致，且财政补贴的部分依赖曲线总体向上。",
+        "在与机制检验一致的统一样本上，借助 Lasso、随机森林和 XGBoost 对 OLS 主回归做了补充检验：Lasso 保留了财政补贴与管理层权力变量，且系数方向与OLS相关路径一致；随机森林和 XGBoost 显示财政补贴仍具有一定特征重要性，XGBoost 的部分依赖曲线总体向上。",
         "摘要ML定位",
+        failures,
+    )
+    expect_absent(
+        thesis,
+        "三种方法均保留了财政补贴与管理层权力变量，系数方向与OLS一致",
+        "摘要ML过度概括旧表述",
+        failures,
+    )
+    expect_absent(
+        thesis,
+        "H2 同时获得了内部治理视角和外部信号层面的双重支持",
+        "H2实证支持误读旧表述",
         failures,
     )
     expect(

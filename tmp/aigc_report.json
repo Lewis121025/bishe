@@ -1,0 +1,62 @@
+{
+  "score": 73,
+  "level": "high",
+  "metrics": {
+    "char_count": 25867,
+    "sentence_count": 569,
+    "paragraph_count": 230,
+    "entropy": 12.114168560372844,
+    "connector_density": 0.2512854215796188,
+    "passive_count": 0,
+    "certainty_count": 2,
+    "hedging_count": 12,
+    "citation_count": 48,
+    "perplexity": 559.4634211258638,
+    "burstiness": 0.2630561416656218,
+    "entropy_cv": 0.1213516781206006
+  },
+  "total_issues": 7,
+  "issues": {
+    "ai_academic_phrases": [
+      {
+        "text": "研究表明",
+        "count": 1,
+        "severity": "critical"
+      }
+    ],
+    "synonym_poverty": [
+      {
+        "text": "\"研究\" 重复 68 次",
+        "count": 68,
+        "severity": "medium"
+      },
+      {
+        "text": "\"结果\" 重复 61 次",
+        "count": 61,
+        "severity": "medium"
+      },
+      {
+        "text": "\"机制\" 重复 36 次",
+        "count": 36,
+        "severity": "medium"
+      },
+      {
+        "text": "\"分析\" 重复 34 次",
+        "count": 34,
+        "severity": "medium"
+      },
+      {
+        "text": "\"水平\" 重复 29 次",
+        "count": 29,
+        "severity": "medium"
+      }
+    ],
+    "data_template": [
+      {
+        "text": "数据显示",
+        "count": 1,
+        "severity": "medium"
+      }
+    ]
+  }
+}
