@@ -284,6 +284,7 @@ def reorder_figure_caption_blocks(text: str) -> str:
                 output.append(lines[j])
                 output.extend(blank_lines or [""])
                 output.append(line)
+                output.append("")
                 i = j + 1
                 continue
         output.append(line)

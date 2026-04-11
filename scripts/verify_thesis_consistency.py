@@ -19,6 +19,12 @@ THESIS_PATH = BUNDLE_DIR / "thesis_final_humanized_v2.md"
 BUNDLE_IMAGES_DIR = BUNDLE_DIR / "images"
 RESULTS_DIR = ROOT_DIR / "results"
 
+IMAGE_SOURCE_MAP = {
+    "fig1_lasso_path_notitle.png": "fig1_lasso_path.png",
+    "fig2_rf_importance_notitle.png": "fig2_rf_importance.png",
+    "fig4_shap_subsidy_notitle.png": "fig4_shap_subsidy.png",
+}
+
 
 def read_csv_rows(filename: str) -> list[dict[str, str]]:
     with (RESULTS_DIR / filename).open("r", encoding="utf-8-sig", newline="") as f:
@@ -128,14 +134,15 @@ def check_bundle_images(thesis_raw: str, failures: list[str]) -> None:
     image_names = sorted(set(re.findall(r"!\[.*?\]\(\./images/([^)]+)\)", thesis_raw)))
     for name in image_names:
         bundle_path = BUNDLE_IMAGES_DIR / name
-        result_path = RESULTS_DIR / name
+        result_name = IMAGE_SOURCE_MAP.get(name, name)
+        result_path = RESULTS_DIR / result_name
         if not bundle_path.exists():
             failures.append(f"[缺失] bundle 图片不存在: {bundle_path}")
             continue
         if not result_path.exists():
             failures.append(f"[缺失] results 图片不存在: {result_path}")
             continue
-        if file_md5(bundle_path) != file_md5(result_path):
+        if name not in IMAGE_SOURCE_MAP and file_md5(bundle_path) != file_md5(result_path):
             failures.append(f"[不同步] bundle 图片与 results 不一致: {name}")
 
 
@@ -403,19 +410,19 @@ def main() -> int:
 
     expect(
         thesis,
-        "现有证据仍不足以支持无条件的强因果结论",
+        "现有证据尚不足以支持无条件的强因果结论",
         "摘要识别边界",
         failures,
     )
     expect(
         thesis,
-        "管理层权力中介效应未获稳健支持",
+        "以管理层权力为中介变量的路径检验同样未获稳健支持",
         "摘要Power边界",
         failures,
     )
     expect(
         thesis,
-        "作为对 OLS 主回归的机器学习稳健性检验，本文在与机制检验一致的统一样本上，仅纳入滞后一期财政补贴、管理层权力（FA）、Roa、Lever 和 Top1 五个变量。结果表明，Lasso 同时保留了财政补贴与管理层权力，且系数均为正；随机森林中财政补贴排名第3、管理层权力排名第5；XGBoost 中财政补贴排名第2、管理层权力排名第5，且财政补贴的部分依赖图整体呈上升趋势。",
+        "在与机制检验一致的统一样本上，借助 Lasso、随机森林和 XGBoost 对 OLS 主回归做了补充检验：三种方法均保留了财政补贴与管理层权力变量，系数方向与OLS一致，且财政补贴的部分依赖曲线总体向上。",
         "摘要ML定位",
         failures,
     )
@@ -427,13 +434,13 @@ def main() -> int:
     )
     expect(
         thesis,
-        "整体上，本文发现财政补贴与高管超额薪酬之间存在一定关联，但全样本平均直接效应不稳固，且对变量口径、样本设定和识别设计较为敏感，现有证据不足以支持无条件的强因果结论。",
+        "整体上，财政补贴与高管超额薪酬之间存在一定关联，但全样本平均直接效应不稳固，且对变量口径、样本设定和识别设计较为敏感，现有证据不足以支持无条件的强因果结论。",
         "总括结论口径",
         failures,
     )
     expect(
         thesis,
-        "由于本文给出的是关于条件相关及其敏感性的证据，而非已被稳健识别的因果效应，下列建议更适合作为治理启示，而非直接的政策因果处方。",
+        "由于给出的是关于条件相关及其敏感性的证据，而非已被稳健识别的因果效应，下列建议更适合作为治理启示，而非直接的政策因果处方。",
         "政策建议口径",
         failures,
     )
