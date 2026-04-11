@@ -16,27 +16,24 @@
 - `heterogeneity_ownership_results.csv`：按产权性质分组的主回归结果
 - `heterogeneity_mechanism_results.csv`：按行业管制、央地分类分组的主回归结果
 
-## 机器学习补充分析
+## 机器学习稳健性检验
 
-- `model_comparison.csv`：回归模型拟合表现对比
-- `classification_comparison.csv`：分类模型辅助识别结果对比
-- `lasso_coefficients.csv`：Lasso 系数筛选结果
-- `rf_reg_importance.csv`、`rf_clf_importance.csv`：随机森林特征重要性
-- `shap_importance.csv`：SHAP 重要性排序
-- `ml_summary.json`、`ml_tuning_summary.json`：机器学习摘要与调参记录
+- `lasso_alpha_search.csv`：Lasso 惩罚参数搜索结果
+- `lasso_coefficients.csv`：Lasso 系数与保留情况
+- `rf_reg_importance.csv`：随机森林回归特征重要性
+- `xgb_importance.csv`：XGBoost 特征重要性排序
+- `xgb_partial_dependence.csv`：XGBoost 对财政补贴变量的部分依赖曲线
+- `ml_validation_summary.csv`、`ml_validation_summary.json`：三种模型对 OLS 主回归的稳健性检验摘要
+- `ml_tuning_summary.json`：分组划分、交叉验证与调参记录
 
 ## 图形文件
 
-- `fig1_lasso_path.png`：Lasso 路径图
-- `fig2_rf_importance.png`：随机森林特征重要性
-- `fig3_shap_summary.png`：SHAP 总结图
-- `fig4_shap_subsidy.png`：财政补贴 SHAP 依赖图
-- `fig4a_shap_subsidy_issoe.png`、`fig4b_shap_subsidy_mgshder.png`：交互结构补充图
-- `fig5_decision_tree.png`：决策树可视化
-- `fig6_kmeans_clusters.png`、`fig7_cluster_heatmap.png`：聚类分析图
-- `fig8_model_comparison.png`：模型对比图
+- `fig1_lasso_path.png`：Lasso 系数收缩图
+- `fig2_rf_importance.png`：随机森林特征重要性图
+- `fig4_shap_subsidy.png`：XGBoost 特征重要性与财政补贴部分依赖图
 
 ## 说明
 
 - 本目录默认仅保留与当前正文口径一致的结果文件和图形文件。
+- 旧版分类、聚类和模型对比结果文件若仍存在，可视为历史输出，不再对应当前论文正文。
 - 旧值整理稿、PDF 转 Markdown 中间文件和其他排版缓存不再保留，以避免误用过时结果。

@@ -25,8 +25,8 @@
   - 输出：`results/回归结果表.docx`
 
 - `ml_analysis.py`
-  - 作用：完成 Lasso、随机森林、XGBoost、SHAP、分类模型与聚类等机器学习补充分析
-  - 主要输出：`results/model_comparison.csv`、`results/classification_comparison.csv` 及 `fig1` 到 `fig8`
+  - 作用：围绕 OLS 主回归完成随机森林、Lasso、XGBoost 三种机器学习稳健性检验
+  - 主要输出：`results/lasso_coefficients.csv`、`results/rf_reg_importance.csv`、`results/xgb_importance.csv`、`results/xgb_partial_dependence.csv` 及机器学习验证摘要文件
 
 - `verify_thesis_consistency.py`
   - 作用：核对 `thesis_final_bundle/thesis_final_humanized_v2.md` 中的核心实证数字是否与 `results/` 目录中的最新结果逐项一致
@@ -54,7 +54,7 @@ python scripts/validate_conversion.py
 python scripts/regression_analysis.py
 python scripts/generate_tables.py
 python scripts/generate_tables_docx.py
-python scripts/ml_analysis.py
+venv/bin/python scripts/ml_analysis.py
 python scripts/verify_thesis_consistency.py
 ./scripts/update_embedded_markdown.sh
 ```
@@ -62,5 +62,6 @@ python scripts/verify_thesis_consistency.py
 ## 使用说明
 
 - 所有脚本都默认以仓库目录为根，不要求必须从某一台特定电脑或绝对路径运行。
+- `ml_analysis.py` 依赖仓库内虚拟环境中的科学计算库，推荐使用 `venv/bin/python` 运行。
 - 若只需查看论文最终结果，通常只需打开 `results/` 目录中的 `.csv`、`.docx` 和 `.png` 文件，无需重新运行脚本。
 - 若只想同步带图片的 Markdown 单文件版本，直接执行 `./scripts/update_embedded_markdown.sh` 即可。

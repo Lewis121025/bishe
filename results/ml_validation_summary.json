@@ -1,0 +1,53 @@
+{
+  "ml_sample_size": 47055,
+  "ml_company_count": 5028,
+  "feature_names": [
+    "lnSubsidy_l1",
+    "Power_FA",
+    "Roa",
+    "Lever",
+    "Top1"
+  ],
+  "core_feature": "lnSubsidy_l1",
+  "power_feature": "Power_FA",
+  "lasso": {
+    "alpha": 0.0012638482029342971,
+    "subsidy_retained": true,
+    "subsidy_coef": 0.015403550069698036,
+    "subsidy_sign": "正",
+    "power_retained": true,
+    "power_coef": 0.014457084812417862,
+    "power_sign": "正",
+    "retained_count": 5,
+    "removed": []
+  },
+  "random_forest": {
+    "subsidy_rank": 3,
+    "subsidy_importance": 0.19564850878475995,
+    "power_rank": 5,
+    "power_importance": 0.16048702456017597,
+    "top_features": [
+      "Roa",
+      "Top1",
+      "lnSubsidy_l1",
+      "Lever",
+      "Power_FA"
+    ]
+  },
+  "xgboost": {
+    "subsidy_rank": 2,
+    "subsidy_importance": 0.24195292592048645,
+    "power_rank": 5,
+    "power_importance": 0.12692052125930786,
+    "top_features": [
+      "Roa",
+      "lnSubsidy_l1",
+      "Top1",
+      "Lever",
+      "Power_FA"
+    ],
+    "pdp_direction": "上升",
+    "pdp_start": -0.005922437645494938,
+    "pdp_end": 0.17261531949043274
+  }
+}
