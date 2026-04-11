@@ -16,10 +16,10 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Cm, Pt
 from docxcompose.composer import Composer
 from lxml import etree, html as lxml_html
 
@@ -35,6 +35,7 @@ KAITI_REPORT_DOCX = ROOT_DIR / "彭晓俞_开题报告 (1).docx"
 COVER_TITLE = "本 科 生 毕 业 论 文 正 文"
 DEFAULT_COHORT_TEXT = "（ 2026 届）"
 COLLEGE_TEXT = "信息科学与技术学院"
+CHINESE_ABSTRACT_FIRST_INDENT_PT = 17.9
 TEMPLATE_DEBUG_FILES = (
     ROOT_DIR / "thesis_final_bundle" / "_pandoc_one_shot.docx",
     ROOT_DIR / "thesis_final_bundle" / "_tmp_template_test.docx",
@@ -123,6 +124,38 @@ def extract_cover_info_from_report_docx(path: Path) -> dict[str, str]:
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", "", text)
+
+
+def extract_display_equation_tags(text: str) -> list[int | None]:
+    tags: list[int | None] = []
+    lines = text.splitlines()
+    in_block = False
+    block_lines: list[str] = []
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not in_block:
+            if not stripped.startswith("$$"):
+                continue
+            if stripped.endswith("$$") and stripped != "$$":
+                tags.append(extract_equation_tag(stripped[2:-2]))
+            elif stripped == "$$":
+                in_block = True
+                block_lines = []
+        else:
+            if stripped == "$$":
+                tags.append(extract_equation_tag("\n".join(block_lines)))
+                in_block = False
+                block_lines = []
+            else:
+                block_lines.append(raw_line)
+
+    return tags
+
+
+def extract_equation_tag(block_text: str) -> int | None:
+    match = re.search(r"\\tag\{(\d+)\}", block_text)
+    return int(match.group(1)) if match else None
 
 
 def collect_markdown_blocks(lines: list[str]) -> list[str]:
@@ -304,7 +337,7 @@ def html_table_to_pipe(table_html: str) -> str:
 
 def convert_html_tables(text: str) -> str:
     pattern = re.compile(r"<table>.*?</table>", re.DOTALL | re.IGNORECASE)
-    return pattern.sub(lambda match: html_table_to_pipe(match.group(0)), text)
+    return pattern.sub(lambda match: "\n\n" + html_table_to_pipe(match.group(0)) + "\n\n", text)
 
 
 def superscript_body_citations_markdown(text: str) -> str:
@@ -810,7 +843,16 @@ def style_cover_and_titles(doc: Document, thesis_title: str, cover_info: dict[st
 
     cover_table = doc.tables[0]
     cover_title = re.sub(r"\s+", "", cover_info.get("thesis_title", thesis_title))
-    fill_cover_cell_text(cover_table.cell(0, 1), cover_title, size_pt=12)
+    cover_title_line1, cover_title_line2 = split_cover_title(cover_title)
+    if cover_title_line2:
+        set_cover_cell_text(
+            cover_table.cell(0, 1),
+            f"{cover_title_line1}\n{cover_title_line2}",
+            size_pt=12,
+            align=WD_ALIGN_PARAGRAPH.LEFT,
+        )
+    else:
+        fill_cover_cell_text(cover_table.cell(0, 1), cover_title, size_pt=12)
     fill_cover_cell_text(cover_table.cell(1, 1), "", size_pt=12)
     fill_cover_cell_text(cover_table.cell(2, 0), "", size_pt=12)
     fill_cover_cell_text(cover_table.cell(3, 1), cover_info.get("student_name", ""))
@@ -954,10 +996,11 @@ def postprocess_abstract_docx(path: Path) -> None:
             continue
         paragraph.style = doc.styles["Normal"]
         paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        set_paragraph_basic_format(paragraph, first_indent=21)
         if in_english_abstract:
+            set_paragraph_basic_format(paragraph, first_indent=21)
             apply_font(paragraph, 10.5, east_asia="Times New Roman", western="Times New Roman")
         else:
+            set_paragraph_basic_format(paragraph, first_indent=CHINESE_ABSTRACT_FIRST_INDENT_PT)
             apply_font(paragraph, 10.5)
     doc.save(path)
 
@@ -1024,15 +1067,49 @@ def superscript_citations(paragraph) -> None:
         parent.remove(run._r)
 
 
-def postprocess_body_docx(path: Path) -> None:
+def add_equation_number(paragraph, number: int) -> None:
+    paragraph.paragraph_format.tab_stops.add_tab_stop(
+        Cm(15.2),
+        alignment=WD_TAB_ALIGNMENT.RIGHT,
+        leader=WD_TAB_LEADER.SPACES,
+    )
+
+    tab_run = paragraph.add_run()
+    tab_run.add_tab()
+    tab_run.font.size = Pt(10.5)
+    _set_run_font(tab_run, western="Times New Roman", east_asia="Times New Roman")
+
+    left_paren = paragraph.add_run("(")
+    left_paren.font.size = Pt(10.5)
+    _set_run_font(left_paren, western="Times New Roman", east_asia="Times New Roman")
+
+    num_run = paragraph.add_run(str(number))
+    num_run.font.size = Pt(10.5)
+    _set_run_font(num_run, western="Times New Roman", east_asia="Times New Roman")
+
+    right_paren = paragraph.add_run(")")
+    right_paren.font.size = Pt(10.5)
+    _set_run_font(right_paren, western="Times New Roman", east_asia="Times New Roman")
+
+
+def postprocess_body_docx(path: Path, equation_tags: list[int | None] | None = None) -> None:
     doc = Document(path)
     heading3_style = doc.styles["标题3"] if "标题3" in doc.styles else doc.styles["Heading 3"]
     first_chapter_seen = False
     in_chapter6 = False
     in_references = False
+    display_equation_idx = 0
 
     for paragraph in doc.paragraphs:
         text = paragraph.text.strip()
+        if "oMathPara" in paragraph._p.xml:
+            if equation_tags and display_equation_idx < len(equation_tags):
+                equation_number = equation_tags[display_equation_idx]
+                if equation_number is not None:
+                    add_equation_number(paragraph, equation_number)
+            display_equation_idx += 1
+            continue
+
         if not text:
             continue
 
@@ -1051,7 +1128,9 @@ def postprocess_body_docx(path: Path) -> None:
             paragraph.style = doc.styles["Heading 2"]
             paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
             set_paragraph_basic_format(paragraph)
-            apply_font(paragraph, 14, bold=True, east_asia="黑体")
+            apply_font(paragraph, 14, bold=False, east_asia="黑体")
+            for run in paragraph.runs:
+                run.bold = False
             continue
 
         if is_heading_3(text):
@@ -1089,7 +1168,7 @@ def postprocess_body_docx(path: Path) -> None:
         paragraph.style = doc.styles["Normal"]
         paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         set_paragraph_basic_format(paragraph, first_indent=21)
-        preserve_bold = in_chapter6 and bool(re.match(r"^\d+\.\s+", text))
+        preserve_bold = in_chapter6 and bool(re.match(r"^(?:\d+\.\s+|（\d+）)", text))
         apply_font(paragraph, 10.5, bold=None if preserve_bold else False)
         if not in_references:
             superscript_citations(paragraph)
@@ -1360,6 +1439,7 @@ def main() -> int:
     cover_info.update(extract_cover_info_from_report_docx(KAITI_REPORT_DOCX))
 
     source_text = SOURCE_MD.read_text(encoding="utf-8")
+    equation_tags = extract_display_equation_tags(source_text)
     (
         title_from_md,
         abstract_blocks,
@@ -1404,7 +1484,7 @@ def main() -> int:
         postprocess_abstract_docx(abstract_docx_path)
 
         run_pandoc(PREPROCESSED_MD, body_docx_path, extra_resource_paths=extra_resource_paths)
-        postprocess_body_docx(body_docx_path)
+        postprocess_body_docx(body_docx_path, equation_tags=equation_tags)
 
         scaffold = build_scaffold_doc(
             thesis_title=thesis_title,
