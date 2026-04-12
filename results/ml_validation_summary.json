@@ -1,53 +1,142 @@
 {
-  "ml_sample_size": 47055,
-  "ml_company_count": 5028,
+  "ml_sample_size": 43417,
+  "ml_company_count": 4937,
   "feature_names": [
-    "lnSubsidy_l1",
-    "Power_FA",
+    "lnSubsidy_pos_l1",
     "Roa",
     "Lever",
     "Top1"
   ],
-  "core_feature": "lnSubsidy_l1",
-  "power_feature": "Power_FA",
+  "core_feature": "lnSubsidy_pos_l1",
   "lasso": {
-    "alpha": 0.0012638482029342971,
+    "alpha": 0.0002652948464431895,
     "subsidy_retained": true,
-    "subsidy_coef": 0.015403550069698036,
+    "subsidy_coef": 0.06849206895334214,
     "subsidy_sign": "正",
-    "power_retained": true,
-    "power_coef": 0.014457084812417862,
-    "power_sign": "正",
-    "retained_count": 5,
-    "removed": []
+    "retained_count": 4,
+    "retained": [
+      "lnSubsidy_pos_l1",
+      "Top1",
+      "Lever",
+      "Roa"
+    ],
+    "removed": [],
+    "coef_map": {
+      "lnSubsidy_pos_l1": 0.06849206895334214,
+      "Top1": -0.061460289143637284,
+      "Lever": -0.05948659687422376,
+      "Roa": -0.019668215716749572
+    }
   },
   "random_forest": {
     "subsidy_rank": 3,
-    "subsidy_importance": 0.19564850878475995,
-    "power_rank": 5,
-    "power_importance": 0.16048702456017597,
+    "subsidy_importance": 0.23191212579828138,
     "top_features": [
       "Roa",
       "Top1",
-      "lnSubsidy_l1",
-      "Lever",
-      "Power_FA"
+      "lnSubsidy_pos_l1",
+      "Lever"
+    ],
+    "importance_table": [
+      {
+        "变量": "Roa",
+        "随机森林重要性": 0.34419129031365236,
+        "排名": 1
+      },
+      {
+        "变量": "Top1",
+        "随机森林重要性": 0.2603111604836283,
+        "排名": 2
+      },
+      {
+        "变量": "lnSubsidy_pos_l1",
+        "随机森林重要性": 0.23191212579828138,
+        "排名": 3
+      },
+      {
+        "变量": "Lever",
+        "随机森林重要性": 0.16358542340443796,
+        "排名": 4
+      }
+    ]
+  },
+  "rf_shap": {
+    "sample_size": 2000,
+    "subsidy_rank": 3,
+    "subsidy_importance": 0.04534781134063817,
+    "importance_table": [
+      {
+        "变量": "Roa",
+        "平均绝对SHAP值": 0.05331136919526208,
+        "排名": 1
+      },
+      {
+        "变量": "Top1",
+        "平均绝对SHAP值": 0.04918023235406512,
+        "排名": 2
+      },
+      {
+        "变量": "lnSubsidy_pos_l1",
+        "平均绝对SHAP值": 0.04534781134063817,
+        "排名": 3
+      },
+      {
+        "变量": "Lever",
+        "平均绝对SHAP值": 0.025253549717114833,
+        "排名": 4
+      }
     ]
   },
   "xgboost": {
     "subsidy_rank": 2,
-    "subsidy_importance": 0.24195292592048645,
-    "power_rank": 5,
-    "power_importance": 0.12692052125930786,
+    "subsidy_importance": 0.27529531717300415,
     "top_features": [
       "Roa",
-      "lnSubsidy_l1",
+      "lnSubsidy_pos_l1",
       "Top1",
-      "Lever",
-      "Power_FA"
+      "Lever"
+    ],
+    "importance_table": [
+      {
+        "变量": "Roa",
+        "XGBoost重要性": 0.30772194266319275,
+        "排名": 1
+      },
+      {
+        "变量": "lnSubsidy_pos_l1",
+        "XGBoost重要性": 0.27529531717300415,
+        "排名": 2
+      },
+      {
+        "变量": "Top1",
+        "XGBoost重要性": 0.2307182103395462,
+        "排名": 3
+      },
+      {
+        "变量": "Lever",
+        "XGBoost重要性": 0.1862645298242569,
+        "排名": 4
+      }
     ],
     "pdp_direction": "上升",
-    "pdp_start": -0.005922437645494938,
-    "pdp_end": 0.17261531949043274
+    "pdp_start": -0.07361986488103867,
+    "pdp_end": 0.213190495967865,
+    "pdp_min": -0.07837367057800293,
+    "pdp_max": 0.213190495967865,
+    "pdp_turn_points": 7,
+    "pdp_values_head": [
+      -0.07361986488103867,
+      -0.0756114050745964,
+      -0.0756114050745964,
+      -0.0756114050745964,
+      -0.0756114050745964
+    ],
+    "pdp_values_tail": [
+      0.1312391608953476,
+      0.13119642436504364,
+      0.13099394738674164,
+      0.19896286725997925,
+      0.213190495967865
+    ]
   }
 }

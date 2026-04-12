@@ -1,13 +1,13 @@
 """
 =============================================================================
-基于数据挖掘的上市公司财政补贴与高管超额薪酬研究 — 机器学习补充分析脚本
+基于数据挖掘的上市公司财政补贴与高管超额薪酬研究 — 机器学习补充验证脚本
 =============================================================================
 
-本脚本不再承担预测竞赛或分类识别任务，而是围绕 OLS 主回归与管理层权力路径
-开展三项机器学习稳健性检验：
-  1. 随机森林：检验财政补贴与管理层权力（FA）在非线性模型中的特征重要性
-  2. Lasso：检验财政补贴与管理层权力（FA）是否被保留，以及方向是否与 OLS 一致
-  3. XGBoost：检验财政补贴与管理层权力（FA）的重要性，并绘制财政补贴部分依赖图观察整体趋势
+本脚本围绕当前 OLS 主回归开展三类机器学习补充验证：
+  1. 随机森林：检验财政补贴强度及控制变量的特征重要性
+  2. SHAP：补充解释随机森林中的边际贡献大小
+  3. Lasso：检验财政补贴变量是否被保留，以及方向是否与 OLS 一致
+  4. XGBoost：检验财政补贴在更灵活树模型中的重要性，并绘制部分依赖图
 """
 
 import json
@@ -21,6 +21,7 @@ import pandas as pd
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
 RESULTS_DIR = os.path.join(ROOT_DIR, "results")
+BUNDLE_IMAGES_DIR = os.path.join(ROOT_DIR, "thesis_final_bundle", "images")
 
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(RESULTS_DIR, ".matplotlib"))
 
@@ -28,6 +29,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import shap
 import xgboost as xgb
 from matplotlib import font_manager
 from sklearn.ensemble import RandomForestRegressor
@@ -57,13 +59,12 @@ _TITLE_FONT = next(
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
-from regression_analysis import build_analysis_dataset
+from regression_analysis import ALT_SUBSIDY_LAG_COL, build_analysis_dataset
 
 RANDOM_STATE = 42
 TEST_SIZE = 0.20
 CV_FOLDS = 5
-SUBSIDY_FEATURE = "lnSubsidy_l1"
-POWER_FEATURE = "Power_FA"
+SUBSIDY_FEATURE = ALT_SUBSIDY_LAG_COL
 
 
 def _rmse(y_true, y_pred):
@@ -130,8 +131,7 @@ def prepare_ml_data(df):
     print("=" * 70)
 
     feature_cols = [
-        "lnSubsidy_l1",
-        "Power_FA",
+        ALT_SUBSIDY_LAG_COL,
         "Roa",
         "Lever",
         "Top1",
@@ -139,12 +139,13 @@ def prepare_ml_data(df):
     target_col = "Overpay"
     use_cols = feature_cols + [target_col, "Symbol", "Year"]
 
+    # 与新的主回归保持一致：只比较上一年已获得财政补贴企业内部的补贴强度差异。
     df_ml = df.dropna(subset=use_cols).copy()
     print(f"  可用样本量: {len(df_ml)}")
     print(f"  公司数量: {df_ml['Symbol'].nunique()}")
     print(f"  特征数量: {len(feature_cols)}")
     print(f"  核心解释变量: {SUBSIDY_FEATURE}")
-    print(f"  管理层权力变量: {POWER_FEATURE}")
+    print(f"  控制变量: {[x for x in feature_cols if x != SUBSIDY_FEATURE]}")
 
     return {
         "df_ml": df_ml,
@@ -179,7 +180,7 @@ def create_holdout_splits(X, y, df_ml):
 
 def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names, output_dir):
     print("\n" + "=" * 70)
-    print("第一部分：Lasso 回归 — 变量保留与方向一致性检验")
+    print("第三部分：Lasso 回归 — 变量保留与方向一致性检验")
     print("=" * 70)
 
     cv = GroupKFold(n_splits=CV_FOLDS)
@@ -220,20 +221,21 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
 
     retained = coef_df.loc[coef_df["绝对值"] > 1e-6, "变量"].tolist()
     removed = coef_df.loc[coef_df["绝对值"] <= 1e-6, "变量"].tolist()
-    subsidy_coef = float(
-        coef_df.loc[coef_df["变量"] == SUBSIDY_FEATURE, "Lasso系数"].iloc[0]
-    )
-    power_coef = float(
-        coef_df.loc[coef_df["变量"] == POWER_FEATURE, "Lasso系数"].iloc[0]
-    )
+    coef_map = {
+        row["变量"]: float(row["Lasso系数"])
+        for _, row in coef_df.iterrows()
+    }
+    subsidy_coef = coef_map[SUBSIDY_FEATURE]
 
     print(f"  最优 alpha = {best_alpha:.6f}")
     print(f"  测试集 R² = {metrics['R2']:.4f}")
     print(f"  5-fold CV R² = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
     print(f"  {SUBSIDY_FEATURE} 系数 = {subsidy_coef:.6f}")
     print(f"  {SUBSIDY_FEATURE} {'被保留' if SUBSIDY_FEATURE in retained else '被压缩为0'}")
-    print(f"  {POWER_FEATURE} 系数 = {power_coef:.6f}")
-    print(f"  {POWER_FEATURE} {'被保留' if POWER_FEATURE in retained else '被压缩为0'}")
+    for feature in feature_names:
+        if feature == SUBSIDY_FEATURE:
+            continue
+        print(f"  {feature} 系数 = {coef_map[feature]:.6f}")
 
     coef_paths = []
     for alpha in alpha_grid:
@@ -254,6 +256,8 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "fig1_lasso_path.png"), bbox_inches="tight")
+    ax.set_title("")
+    plt.savefig(os.path.join(BUNDLE_IMAGES_DIR, "fig1_lasso_path_notitle.png"), bbox_inches="tight")
     plt.close()
 
     return {
@@ -265,9 +269,7 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
         "subsidy_coef": subsidy_coef,
         "subsidy_retained": SUBSIDY_FEATURE in retained,
         "subsidy_sign": "正" if subsidy_coef > 0 else ("负" if subsidy_coef < 0 else "零"),
-        "power_coef": power_coef,
-        "power_retained": POWER_FEATURE in retained,
-        "power_sign": "正" if power_coef > 0 else ("负" if power_coef < 0 else "零"),
+        "coef_map": coef_map,
         "test_metrics": metrics,
         "cv_mean": float(cv_scores.mean()),
         "cv_std": float(cv_scores.std()),
@@ -277,7 +279,7 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
 
 def random_forest_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names, output_dir):
     print("\n" + "=" * 70)
-    print("第二部分：随机森林 — 特征重要性检验")
+    print("第一部分：随机森林 — 特征重要性检验")
     print("=" * 70)
 
     cv = GroupKFold(n_splits=CV_FOLDS)
@@ -322,17 +324,12 @@ def random_forest_analysis(X_train, X_test, y_train, y_test, groups_train, featu
     subsidy_row = importance_df.loc[importance_df["变量"] == SUBSIDY_FEATURE].iloc[0]
     subsidy_rank = int(subsidy_row["排名"])
     subsidy_importance = float(subsidy_row["随机森林重要性"])
-    power_row = importance_df.loc[importance_df["变量"] == POWER_FEATURE].iloc[0]
-    power_rank = int(power_row["排名"])
-    power_importance = float(power_row["随机森林重要性"])
     top_features = importance_df.head(5)["变量"].tolist()
 
     print(f"  测试集 R² = {metrics['R2']:.4f}")
     print(f"  5-fold CV R² = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
     print(f"  {SUBSIDY_FEATURE} 排名 = {subsidy_rank}")
     print(f"  {SUBSIDY_FEATURE} 重要性 = {subsidy_importance:.6f}")
-    print(f"  {POWER_FEATURE} 排名 = {power_rank}")
-    print(f"  {POWER_FEATURE} 重要性 = {power_importance:.6f}")
 
     fig, ax = plt.subplots(figsize=(10, 6))
     plot_df = importance_df.sort_values("随机森林重要性", ascending=True)
@@ -341,9 +338,12 @@ def random_forest_analysis(X_train, X_test, y_train, y_test, groups_train, featu
     ax.set_title("图4-1 随机森林特征重要性图", fontproperties=_TITLE_FONT)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "fig2_rf_importance.png"), bbox_inches="tight")
+    ax.set_title("")
+    plt.savefig(os.path.join(BUNDLE_IMAGES_DIR, "fig2_rf_importance_notitle.png"), bbox_inches="tight")
     plt.close()
 
     return {
+        "model": rf_model,
         "test_metrics": metrics,
         "cv_mean": float(cv_scores.mean()),
         "cv_std": float(cv_scores.std()),
@@ -351,14 +351,59 @@ def random_forest_analysis(X_train, X_test, y_train, y_test, groups_train, featu
         "top_features": top_features,
         "subsidy_rank": subsidy_rank,
         "subsidy_importance": subsidy_importance,
-        "power_rank": power_rank,
-        "power_importance": power_importance,
+        "importance_table": importance_df.to_dict(orient="records"),
+    }
+
+
+def rf_shap_analysis(rf_model, X_reference, feature_names, output_dir):
+    print("\n" + "=" * 70)
+    print("第二部分：SHAP 值解释分析")
+    print("=" * 70)
+
+    shap_sample = X_reference.sample(n=min(2000, len(X_reference)), random_state=RANDOM_STATE).copy()
+    explainer = shap.TreeExplainer(rf_model)
+    shap_values = explainer.shap_values(shap_sample)
+    if isinstance(shap_values, list):
+        shap_values = shap_values[0]
+
+    mean_abs = np.abs(shap_values).mean(axis=0)
+    importance_df = pd.DataFrame({
+        "变量": feature_names,
+        "平均绝对SHAP值": mean_abs,
+    }).sort_values("平均绝对SHAP值", ascending=False).reset_index(drop=True)
+    importance_df["排名"] = np.arange(1, len(importance_df) + 1)
+    importance_df.to_csv(os.path.join(output_dir, "shap_importance.csv"), index=False)
+
+    subsidy_row = importance_df.loc[importance_df["变量"] == SUBSIDY_FEATURE].iloc[0]
+    subsidy_rank = int(subsidy_row["排名"])
+    subsidy_importance = float(subsidy_row["平均绝对SHAP值"])
+
+    print(f"  SHAP 计算样本量 = {len(shap_sample)}")
+    print(f"  {SUBSIDY_FEATURE} 平均绝对SHAP值排名 = {subsidy_rank}")
+    print(f"  {SUBSIDY_FEATURE} 平均绝对SHAP值 = {subsidy_importance:.6f}")
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    plot_df = importance_df.sort_values("平均绝对SHAP值", ascending=True)
+    ax.barh(plot_df["变量"], plot_df["平均绝对SHAP值"], color="#9C27B0")
+    ax.set_xlabel("平均绝对SHAP值")
+    ax.set_title("图4-2 SHAP值重要性图", fontproperties=_TITLE_FONT)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "fig3_shap_summary.png"), bbox_inches="tight")
+    ax.set_title("")
+    plt.savefig(os.path.join(BUNDLE_IMAGES_DIR, "fig3_shap_summary_notitle.png"), bbox_inches="tight")
+    plt.close()
+
+    return {
+        "sample_size": int(len(shap_sample)),
+        "subsidy_rank": subsidy_rank,
+        "subsidy_importance": subsidy_importance,
+        "importance_table": importance_df.to_dict(orient="records"),
     }
 
 
 def xgboost_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names, output_dir):
     print("\n" + "=" * 70)
-    print("第三部分：XGBoost — 特征重要性与部分依赖检验")
+    print("第四部分：XGBoost — 特征重要性与部分依赖检验")
     print("=" * 70)
 
     cv = GroupKFold(n_splits=CV_FOLDS)
@@ -410,9 +455,6 @@ def xgboost_analysis(X_train, X_test, y_train, y_test, groups_train, feature_nam
     subsidy_row = importance_df.loc[importance_df["变量"] == SUBSIDY_FEATURE].iloc[0]
     subsidy_rank = int(subsidy_row["排名"])
     subsidy_importance = float(subsidy_row["XGBoost重要性"])
-    power_row = importance_df.loc[importance_df["变量"] == POWER_FEATURE].iloc[0]
-    power_rank = int(power_row["排名"])
-    power_importance = float(power_row["XGBoost重要性"])
     top_features = importance_df.head(5)["变量"].tolist()
 
     pd_result = partial_dependence(
@@ -430,13 +472,12 @@ def xgboost_analysis(X_train, X_test, y_train, y_test, groups_train, feature_nam
     pdp_df.to_csv(os.path.join(output_dir, "xgb_partial_dependence.csv"), index=False)
 
     pdp_direction = "上升" if avg_values[-1] > avg_values[0] else ("下降" if avg_values[-1] < avg_values[0] else "平缓")
+    pdp_turn_points = int(np.sum(((avg_values[1:-1] - avg_values[:-2]) * (avg_values[2:] - avg_values[1:-1])) < 0))
 
     print(f"  测试集 R² = {metrics['R2']:.4f}")
     print(f"  5-fold CV R² = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
     print(f"  {SUBSIDY_FEATURE} 排名 = {subsidy_rank}")
     print(f"  {SUBSIDY_FEATURE} 重要性 = {subsidy_importance:.6f}")
-    print(f"  {POWER_FEATURE} 排名 = {power_rank}")
-    print(f"  {POWER_FEATURE} 重要性 = {power_importance:.6f}")
     print(f"  {SUBSIDY_FEATURE} 部分依赖整体趋势 = {pdp_direction}")
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -459,6 +500,10 @@ def xgboost_analysis(X_train, X_test, y_train, y_test, groups_train, feature_nam
     plt.suptitle("图4-3 XGBoost特征重要性与财政补贴部分依赖图", fontproperties=_TITLE_FONT, y=1.02)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "fig4_shap_subsidy.png"), bbox_inches="tight")
+    axes[0].set_title("")
+    axes[1].set_title("")
+    plt.suptitle("")
+    plt.savefig(os.path.join(BUNDLE_IMAGES_DIR, "fig4_shap_subsidy_notitle.png"), bbox_inches="tight")
     plt.close()
 
     return {
@@ -469,15 +514,19 @@ def xgboost_analysis(X_train, X_test, y_train, y_test, groups_train, feature_nam
         "top_features": top_features,
         "subsidy_rank": subsidy_rank,
         "subsidy_importance": subsidy_importance,
-        "power_rank": power_rank,
-        "power_importance": power_importance,
+        "importance_table": importance_df.to_dict(orient="records"),
         "pdp_direction": pdp_direction,
         "pdp_start": float(avg_values[0]),
         "pdp_end": float(avg_values[-1]),
+        "pdp_min": float(avg_values.min()),
+        "pdp_max": float(avg_values.max()),
+        "pdp_turn_points": pdp_turn_points,
+        "pdp_values_head": [float(x) for x in avg_values[:5]],
+        "pdp_values_tail": [float(x) for x in avg_values[-5:]],
     }
 
 
-def save_ml_outputs(output_dir, prepared, splits, lasso_result, rf_result, xgb_result):
+def save_ml_outputs(output_dir, prepared, splits, lasso_result, rf_result, shap_result, xgb_result):
     tuning_summary = {
         "split": {
             "test_size": TEST_SIZE,
@@ -510,79 +559,58 @@ def save_ml_outputs(output_dir, prepared, splits, lasso_result, rf_result, xgb_r
         "ml_company_count": int(prepared["df_ml"]["Symbol"].nunique()),
         "feature_names": prepared["feature_names"],
         "core_feature": SUBSIDY_FEATURE,
-        "power_feature": POWER_FEATURE,
         "lasso": {
             "alpha": lasso_result["alpha"],
             "subsidy_retained": lasso_result["subsidy_retained"],
             "subsidy_coef": lasso_result["subsidy_coef"],
             "subsidy_sign": lasso_result["subsidy_sign"],
-            "power_retained": lasso_result["power_retained"],
-            "power_coef": lasso_result["power_coef"],
-            "power_sign": lasso_result["power_sign"],
             "retained_count": len(lasso_result["retained"]),
+            "retained": lasso_result["retained"],
             "removed": lasso_result["removed"],
+            "coef_map": lasso_result["coef_map"],
         },
         "random_forest": {
             "subsidy_rank": rf_result["subsidy_rank"],
             "subsidy_importance": rf_result["subsidy_importance"],
-            "power_rank": rf_result["power_rank"],
-            "power_importance": rf_result["power_importance"],
             "top_features": rf_result["top_features"],
+            "importance_table": rf_result["importance_table"],
+        },
+        "rf_shap": {
+            "sample_size": shap_result["sample_size"],
+            "subsidy_rank": shap_result["subsidy_rank"],
+            "subsidy_importance": shap_result["subsidy_importance"],
+            "importance_table": shap_result["importance_table"],
         },
         "xgboost": {
             "subsidy_rank": xgb_result["subsidy_rank"],
             "subsidy_importance": xgb_result["subsidy_importance"],
-            "power_rank": xgb_result["power_rank"],
-            "power_importance": xgb_result["power_importance"],
             "top_features": xgb_result["top_features"],
+            "importance_table": xgb_result["importance_table"],
             "pdp_direction": xgb_result["pdp_direction"],
             "pdp_start": xgb_result["pdp_start"],
             "pdp_end": xgb_result["pdp_end"],
+            "pdp_min": xgb_result["pdp_min"],
+            "pdp_max": xgb_result["pdp_max"],
+            "pdp_turn_points": xgb_result["pdp_turn_points"],
+            "pdp_values_head": xgb_result["pdp_values_head"],
+            "pdp_values_tail": xgb_result["pdp_values_tail"],
         },
     }
     with open(os.path.join(output_dir, "ml_validation_summary.json"), "w", encoding="utf-8") as f:
         json.dump(validation_summary, f, ensure_ascii=False, indent=2)
-
-    summary_rows = [
-        {
-            "模型": "随机森林",
-            "验证角度": "特征重要性",
-            "核心变量": f"{SUBSIDY_FEATURE}；{POWER_FEATURE}",
-            "主要结果": (
-                f"{SUBSIDY_FEATURE} 排名第{rf_result['subsidy_rank']}，"
-                f"{POWER_FEATURE} 排名第{rf_result['power_rank']}"
-            ),
-            "与OLS对应关系": "说明财政补贴与管理层权力在非线性模型中仍保留信息含量",
-        },
-        {
-            "模型": "Lasso",
-            "验证角度": "变量保留与方向",
-            "核心变量": f"{SUBSIDY_FEATURE}；{POWER_FEATURE}",
-            "主要结果": (
-                f"{SUBSIDY_FEATURE}{'被保留' if lasso_result['subsidy_retained'] else '被压缩为0'}且为{lasso_result['subsidy_sign']}；"
-                f"{POWER_FEATURE}{'被保留' if lasso_result['power_retained'] else '被压缩为0'}且为{lasso_result['power_sign']}"
-            ),
-            "与OLS对应关系": "说明财政补贴与管理层权力的方向判断未发生反转",
-        },
-        {
-            "模型": "XGBoost",
-            "验证角度": "重要性与部分依赖趋势",
-            "核心变量": f"{SUBSIDY_FEATURE}；{POWER_FEATURE}",
-            "主要结果": (
-                f"{SUBSIDY_FEATURE} 排名第{xgb_result['subsidy_rank']}，"
-                f"{POWER_FEATURE} 排名第{xgb_result['power_rank']}，"
-                f"{SUBSIDY_FEATURE} 部分依赖整体{xgb_result['pdp_direction']}"
-            ),
-            "与OLS对应关系": "说明在更灵活模型中财政补贴趋势与核心治理变量信息仍可辨识",
-        },
-    ]
-    pd.DataFrame(summary_rows).to_csv(os.path.join(output_dir, "ml_validation_summary.csv"), index=False)
+    pd.DataFrame(
+        [
+            {"模型": "随机森林", "变量": row["变量"], "重要性": row["随机森林重要性"], "排名": row["排名"]}
+            for row in rf_result["importance_table"]
+        ]
+    ).to_csv(os.path.join(output_dir, "ml_validation_summary.csv"), index=False)
 
 
 def main():
     data_dir = os.path.join(ROOT_DIR, "processed_data")
     output_dir = os.path.join(ROOT_DIR, "results")
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(BUNDLE_IMAGES_DIR, exist_ok=True)
 
     print("加载数据...")
     df, _ = build_analysis_dataset(data_dir)
@@ -594,7 +622,7 @@ def main():
     print("#  机器学习稳健性检验开始")
     print("#" * 70)
 
-    lasso_result = lasso_analysis(
+    rf_result = random_forest_analysis(
         splits["X_train"],
         splits["X_test"],
         splits["y_train"],
@@ -603,7 +631,13 @@ def main():
         prepared["feature_names"],
         output_dir,
     )
-    rf_result = random_forest_analysis(
+    rf_shap_result = rf_shap_analysis(
+        rf_result["model"],
+        splits["X_test"],
+        prepared["feature_names"],
+        output_dir,
+    )
+    lasso_result = lasso_analysis(
         splits["X_train"],
         splits["X_test"],
         splits["y_train"],
@@ -628,6 +662,7 @@ def main():
         splits,
         lasso_result,
         rf_result,
+        rf_shap_result,
         xgb_result,
     )
 
@@ -636,8 +671,8 @@ def main():
     print("=" * 70)
     print(
         "已生成：lasso_alpha_search.csv、lasso_coefficients.csv、rf_reg_importance.csv、"
-        "xgb_importance.csv、xgb_partial_dependence.csv、ml_validation_summary.csv、"
-        "ml_validation_summary.json 及图4-1到图4-3。"
+        "shap_importance.csv、xgb_importance.csv、xgb_partial_dependence.csv、"
+        "ml_validation_summary.csv、ml_validation_summary.json 及图4-1到图4-4。"
     )
 
 

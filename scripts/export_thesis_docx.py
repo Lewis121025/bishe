@@ -475,6 +475,27 @@ def split_cover_title(title: str, max_len: int = 18) -> tuple[str, str]:
     return compact[:mid], compact[mid:]
 
 
+def format_chinese_title_lines(title: str) -> str:
+    line1, line2 = split_cover_title(title)
+    return f"{line1}\n{line2}" if line2 else line1
+
+
+def split_english_title(title: str, max_len: int = 55) -> list[str]:
+    words = title.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if current and len(candidate) > max_len:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
 def element_tag(element) -> str:
     return element.tag.split("}")[-1]
 
@@ -642,10 +663,10 @@ def extract_existing_toc_page_cache(path: Path) -> dict[str, str]:
 def toc_level_for_heading(text: str) -> int | None:
     if re.match(r"^第[一二三四五六七八九十]+章\s+", text) or text in {"参考文献", "致谢"}:
         return 1
-    if is_heading_3(text):
-        return 3
     if is_heading_2(text):
         return 2
+    if is_heading_3(text):
+        return None
     return None
 
 
@@ -816,7 +837,7 @@ def replace_toc_with_template_fields(doc: Document, page_cache: dict[str, str]) 
             level=int(entry["level"]),
             bookmark_name=str(entry["bookmark"]),
             page_result=page_result,
-            include_toc_field=offset == 0,
+            include_toc_field=False,
         )
         doc.element.body.insert(layout["toc_insert_idx"] + offset, paragraph)
 
@@ -844,16 +865,16 @@ def style_cover_and_titles(doc: Document, thesis_title: str, cover_info: dict[st
 
     cover_table = doc.tables[0]
     cover_title = re.sub(r"\s+", "", cover_info.get("thesis_title", thesis_title))
-    cover_title_line1, cover_title_line2 = split_cover_title(cover_title)
-    if cover_title_line2:
+    cover_title_text = format_chinese_title_lines(cover_title)
+    if "\n" in cover_title_text:
         set_cover_cell_text(
             cover_table.cell(0, 1),
-            f"{cover_title_line1}\n{cover_title_line2}",
-            size_pt=12,
+            cover_title_text,
+            size_pt=14,
             align=WD_ALIGN_PARAGRAPH.LEFT,
         )
     else:
-        fill_cover_cell_text(cover_table.cell(0, 1), cover_title, size_pt=12)
+        fill_cover_cell_text(cover_table.cell(0, 1), cover_title, size_pt=14)
     fill_cover_cell_text(cover_table.cell(1, 1), "", size_pt=12)
     fill_cover_cell_text(cover_table.cell(2, 0), "", size_pt=12)
     fill_cover_cell_text(cover_table.cell(3, 1), cover_info.get("student_name", ""))
@@ -869,7 +890,7 @@ def style_abstract_and_toc_shell(doc: Document, layout: dict[str, int], thesis_t
     para_map = {paragraph._p: paragraph for paragraph in doc.paragraphs}
 
     abstract_title_para = para_map[blocks[layout["abstract_title_idx"]]]
-    set_paragraph_text(abstract_title_para, thesis_title)
+    set_paragraph_text(abstract_title_para, format_chinese_title_lines(thesis_title))
     abstract_title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     set_paragraph_basic_format(abstract_title_para)
     apply_font(abstract_title_para, 16, east_asia="黑体", western="黑体")
@@ -989,6 +1010,7 @@ def postprocess_abstract_docx(path: Path) -> None:
             style_english_keywords_paragraph(paragraph, text.replace("Keywords：", "Keywords:"))
             continue
         if re.fullmatch(r"[A-Z0-9 ,:&'\-()]+", text) and len(text) > 20:
+            set_paragraph_text(paragraph, "\n".join(split_english_title(text)))
             paragraph.style = doc.styles["Normal"]
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             set_paragraph_basic_format(paragraph, first_indent=0)
@@ -1069,6 +1091,9 @@ def superscript_citations(paragraph) -> None:
 
 
 def add_equation_number(paragraph, number: int) -> None:
+    paragraph.style = paragraph.part.document.styles["Normal"]
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    set_paragraph_basic_format(paragraph, first_indent=0)
     paragraph.paragraph_format.tab_stops.add_tab_stop(
         Cm(15.2),
         alignment=WD_TAB_ALIGNMENT.RIGHT,
@@ -1082,7 +1107,7 @@ def add_equation_number(paragraph, number: int) -> None:
 
     left_paren = paragraph.add_run("(")
     left_paren.font.size = Pt(10.5)
-    _set_run_font(left_paren, western="Times New Roman", east_asia="Times New Roman")
+    _set_run_font(left_paren, western="宋体", east_asia="宋体")
 
     num_run = paragraph.add_run(str(number))
     num_run.font.size = Pt(10.5)
@@ -1090,7 +1115,7 @@ def add_equation_number(paragraph, number: int) -> None:
 
     right_paren = paragraph.add_run(")")
     right_paren.font.size = Pt(10.5)
-    _set_run_font(right_paren, western="Times New Roman", east_asia="Times New Roman")
+    _set_run_font(right_paren, western="宋体", east_asia="宋体")
 
 
 def postprocess_body_docx(path: Path, equation_tags: list[int | None] | None = None) -> None:
@@ -1450,7 +1475,8 @@ def main() -> int:
         english_keywords,
         body_text,
     ) = extract_title_abstract_keywords_body(source_text)
-    thesis_title = cover_info.get("thesis_title", title_from_md)
+    cover_info["thesis_title"] = title_from_md
+    thesis_title = title_from_md
     cohort_text = f"（ {cover_info['year']} 届）" if cover_info.get("year") else DEFAULT_COHORT_TEXT
 
     body_md = build_pandoc_body_markdown(body_text)
