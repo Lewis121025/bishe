@@ -39,6 +39,8 @@ SAMPLE_SUMMARY_PATH = RESULTS_DIR / "sample_screening_summary.csv"
 MAIN_FE_PATH = RESULTS_DIR / "main_regression_fe_comparison.csv"
 ROBUSTNESS_PATH = RESULTS_DIR / "robustness_results.csv"
 HECKMAN_PATH = RESULTS_DIR / "heckman_results.csv"
+EVENT_STUDY_SUMMARY_PATH = RESULTS_DIR / "event_study_summary.json"
+EVENT_STUDY_RESULTS_PATH = RESULTS_DIR / "event_study_results.csv"
 
 IMAGE_SOURCE_MAP = {
     "fig1_lasso_path_notitle.png": "fig1_lasso_path.png",
@@ -83,6 +85,10 @@ def fmt_coef(value: int | float, p_value: int | float, digits: int = 4) -> str:
 def fmt_p_text(value: int | float) -> str:
     p = float(value)
     return "< 0.001" if p < 0.001 else f"= {p:.3f}"
+
+
+def fmt_wan(value: int | float, digits: int = 2) -> str:
+    return f"{float(value) / 10000:,.{digits}f}"
 
 
 def expect(text: str, needle: str, label: str, failures: list[str]) -> None:
@@ -177,10 +183,19 @@ def check_docx_exists(failures: list[str]) -> None:
         return
 
     doc = Document(DOCX_PATH)
-    if doc.tables:
-        cover_title = doc.tables[0].cell(0, 1).text.strip()
-        if "\n" not in cover_title:
-            failures.append("[DOCX格式] 封面论文题目未按长题目手动换行")
+    cover_title_candidates = []
+    for paragraph in doc.paragraphs[:30]:
+        text = paragraph.text.strip()
+        normalized = re.sub(r"\s+", "", text)
+        if not normalized:
+            continue
+        if "毕业论文正文" in normalized or "信息科学与技术学院" in normalized or "届" in normalized:
+            continue
+        if normalized == "摘要" or normalized == "目录":
+            continue
+        cover_title_candidates.append(text)
+    if not cover_title_candidates or "\n" not in cover_title_candidates[0]:
+        failures.append("[DOCX格式] 封面论文题目未按长题目手动换行")
 
     nonempty_paragraphs = [(idx, paragraph.text.strip()) for idx, paragraph in enumerate(doc.paragraphs) if paragraph.text.strip()]
     for pos, (idx, text) in enumerate(nonempty_paragraphs):
@@ -304,13 +319,6 @@ def build_results() -> dict:
     X5 = mediation_df[[ALT_SUBSIDY_LAG_COL, "Power_FA"] + controls]
     m5 = _fit_with_cluster_se(mediation_df["Overpay"], X5)
 
-    pca_df = positive_df.dropna(
-        subset=["Overpay", "Power_PCA", ALT_SUBSIDY_LAG_COL, "Year"] + controls
-    ).copy()
-    pca_df = pca_df.set_index(["Symbol", "Year"], drop=False)
-    pca_a = _fit_with_cluster_se(pca_df["Power_PCA"], pca_df[[ALT_SUBSIDY_LAG_COL] + controls])
-    pca_b = _fit_with_cluster_se(pca_df["Overpay"], pca_df[[ALT_SUBSIDY_LAG_COL, "Power_PCA"] + controls])
-
     placebo_df = df.sort_values(["Symbol", "Year"]).copy()
     placebo_df["lnSubsidy_pos_f1_new"] = placebo_df.groupby("Symbol")["lnSubsidy_pos"].shift(-1)
     placebo_df["lnSubsidy_pos_f2_new"] = placebo_df.groupby("Symbol")["lnSubsidy_pos"].shift(-2)
@@ -332,6 +340,8 @@ def build_results() -> dict:
 
     ml_summary = json.loads((RESULTS_DIR / "ml_validation_summary.json").read_text(encoding="utf-8"))
     ml_tuning = json.loads((RESULTS_DIR / "ml_tuning_summary.json").read_text(encoding="utf-8"))
+    event_study_summary = json.loads(EVENT_STUDY_SUMMARY_PATH.read_text(encoding="utf-8"))
+    event_study_rows = pd.read_csv(EVENT_STUDY_RESULTS_PATH, encoding="utf-8-sig")
 
     return {
         "main": main,
@@ -353,12 +363,12 @@ def build_results() -> dict:
         "m3": m3,
         "m4": m4,
         "m5": m5,
-        "pca_a": pca_a,
-        "pca_b": pca_b,
         "placebo_f1": placebo_f1,
         "placebo_f2": placebo_f2,
         "placebo_f1_strict": placebo_f1_strict,
         "placebo_f2_strict": placebo_f2_strict,
+        "event_study_summary": event_study_summary,
+        "event_study_rows": event_study_rows,
         "ml_summary": ml_summary,
         "ml_tuning": ml_tuning,
     }
@@ -412,6 +422,19 @@ def check_result_exports(res: dict, failures: list[str]) -> None:
             expect_true(int(row["outcome_sample_size"]) == int(res["heckman"]["outcome_sample_size"]), "heckman_results", "结果方程样本量未同步", failures)
             expect_true(abs(float(row["subsidy_coef"]) - float(res["heckman"]["subsidy_coef"])) < 1e-12, "heckman_results", "Heckman 补贴系数未同步", failures)
 
+    if not EVENT_STUDY_SUMMARY_PATH.exists():
+        failures.append(f"[缺失] 结果文件不存在: {EVENT_STUDY_SUMMARY_PATH}")
+    else:
+        summary = json.loads(EVENT_STUDY_SUMMARY_PATH.read_text(encoding="utf-8"))
+        expect_true(int(summary["sample_size"]) == int(res["main"]["sample_size"]), "event_study_summary", "事件研究样本量未与基准回归同步", failures)
+        expect_true(float(summary["pretrend_p"]) > 0.05, "event_study_summary", "事件研究前趋势联合检验未通过", failures)
+
+    if not EVENT_STUDY_RESULTS_PATH.exists():
+        failures.append(f"[缺失] 结果文件不存在: {EVENT_STUDY_RESULTS_PATH}")
+    else:
+        event_rows = pd.read_csv(EVENT_STUDY_RESULTS_PATH)
+        expect_true(set(event_rows["event_time"]) == {-3, -2, 0, 1, 2, 3}, "event_study_results", "事件期设置异常", failures)
+
 
 def check_thesis_against_results(thesis_raw: str, failures: list[str], res: dict | None = None) -> None:
     if res is None:
@@ -431,7 +454,7 @@ def check_thesis_against_results(thesis_raw: str, failures: list[str], res: dict
 
     expect(
         thesis_raw,
-        "经过这些步骤，原始公司—年度观测为70,559条；剔除金融行业后为69,142条；再剔除特殊处理样本后为63,011条；满足关键变量完整要求的样本为52,980条；满足期望薪酬模型完整案例要求的样本为52,805条；纳入管理层权力底层指标后，可用于构造 Power 的样本为50,171条；在主回归中进一步要求“上一年补助金额大于0”且滞后一期补贴强度可得后，模型2样本为43,417条；机器学习补充验证与主回归保持同一变量口径，因此其可用样本同样为43,417条；在中介效应检验中要求 Overpay、Power 与滞后一期正补助均完整后，统一样本为41,186条。",
+        "经过这些步骤，原始公司—年度观测为70,559条；剔除金融行业后为69,142条；再剔除特殊处理样本后为63,011条；满足关键变量完整要求的样本为52,980条；满足基准薪酬模型完整案例要求的样本为52,805条；纳入管理层权力底层指标后，可用于构造 Power 的样本为50,171条；在基准回归中进一步要求“上一年补助金额大于0”且滞后一期补贴强度可得后，模型2样本为43,417条；机器学习补充验证与基准回归保持同一变量口径，因此其可用样本同样为43,417条；在中介效应检验中要求 Overpay、Power 与滞后一期正补助均完整后，统一样本为41,186条。",
         "样本筛选链",
         failures,
     )
@@ -511,29 +534,42 @@ def check_thesis_against_results(thesis_raw: str, failures: list[str], res: dict
     expect(thesis_raw, "<tr><td>lnSubsidy_pos_l1</td><td>−0.0020（−0.36）</td><td>0.0110***（2.90）</td></tr>", "表4-12 主系数", failures)
     expect(thesis_raw, "<tr><td>lnSubsidy_pos_l1</td><td>0.0049（0.59）</td><td>0.0002（0.03）</td></tr>", "表4-13 主系数", failures)
 
+    event_summary = res["event_study_summary"]
+    event_rows = res["event_study_rows"].set_index("event_time")
     expect(
         thesis_raw,
-        "安慰剂检验显示，在“公司固定效应 + 年份固定效应”的基准设定下，未来一期和未来两期正补助的系数分别为0.0152（p < 0.001）和0.0108（p = 0.004），均显著为正。进一步把固定效应改为“公司固定效应 + 行业×年份固定效应”后，两项安慰剂系数仍分别为0.0140（p < 0.001）和0.0093（p = 0.011）。",
-        "安慰剂段落",
+        f"当前阈值对应正补助样本的上四分位数，约为{fmt_wan(event_summary['threshold_value'])}万元；识别到的处理企业为{fmt_int(event_summary['treated_firms'])}家，纳入动态检验的样本量为{fmt_int(event_summary['sample_size'])}条。",
+        "事件研究样本段落",
+        failures,
+    )
+    expect(
+        thesis_raw,
+        f"联合检验结果显示，事件发生前两期和前三期的系数并不显著，前趋势联合检验的 p 值为{float(event_summary['pretrend_p']):.3f}，说明在进入高补贴状态之前，处理组与对照组并未表现出系统性差异。与之相对，事件当期及随后1至3期的系数分别为{fmt_fixed(event_rows.loc[0, 'coef'])}（p {fmt_p_text(event_rows.loc[0, 'p_value'])}）、{fmt_fixed(event_rows.loc[1, 'coef'])}（p {fmt_p_text(event_rows.loc[1, 'p_value'])}）、{fmt_fixed(event_rows.loc[2, 'coef'])}（p {fmt_p_text(event_rows.loc[2, 'p_value'])}）和{fmt_fixed(event_rows.loc[3, 'coef'])}（p {fmt_p_text(event_rows.loc[3, 'p_value'])}），均为正且达到常见显著性标准。",
+        "事件研究结果段落",
         failures,
     )
 
     expect(
         thesis_raw,
-        "（2）**新主回归在多种稳健性设定下保持正向显著，且异质性结果较为清晰。** 将因变量替换为高管前三名薪酬对数后，补贴强度系数为0.0331（p < 0.001）；样本期缩短至2010—2020年后，系数为0.0120（p = 0.003）；仅保留制造业样本后，系数为0.0099（p = 0.023）；引入行业×年份固定效应后，系数仍为0.0082（p = 0.013）。产权与行业分组进一步表明，正向关联主要集中在私营企业（0.0135，p = 0.004）和非管制行业（0.0110，p = 0.004），而国有企业、管制行业以及央地国企内部都未形成稳健显著结果。",
+        "（2）**基准回归在多种稳健性设定下保持正向显著，且异质性结果较为清晰。** 将因变量替换为高管前三名薪酬对数后，补贴强度系数为0.0331（p < 0.001）；样本期缩短至2010—2020年后，系数为0.0120（p = 0.003）；仅保留制造业样本后，系数为0.0099（p = 0.023）；引入行业×年份固定效应后，系数仍为0.0082（p = 0.013）。产权与行业分组进一步表明，正向关联主要集中在私营企业（0.0135，p = 0.004）和非管制行业（0.0110，p = 0.004），而国有企业、管制行业以及央地国企内部都未形成稳健显著结果。",
         "结论第2点",
         failures,
     )
     expect(
         thesis_raw,
-        "（3）**选择偏差校正与主回归方向一致，但未来补贴安慰剂仍提示因果解释需要保持谨慎。** 主回归口径下，Heckman 两步法中的逆米尔斯比率显著（p = 0.0056），校正后的补贴系数仍为0.0093（p = 0.008），提示主结果不宜简单归因于样本选择。进一步看，未来一期和未来两期正补助在基准设定下分别为0.0152（p < 0.001）和0.0108（p = 0.004），在行业×年份固定效应下仍保持显著。这说明补贴持续性、前瞻性选择和时变遗漏因素尚未被彻底切断，因此不能把表4-5的正向结果直接解释为强因果效应。",
+        "（3）**选择偏差校正和事件研究式动态检验均未改变基准回归方向，但因果解释仍需保持谨慎。** 基准回归口径下，Heckman 两步法中的逆米尔斯比率显著（p = 0.0056），校正后的补贴系数仍为0.0093（p = 0.008），提示主结果不宜简单归因于样本选择。进一步看，事件研究中的前趋势联合检验 p 值为0.669，事件当期及随后1至3期的系数分别为0.0235（p = 0.034）、0.0268（p = 0.018）、0.0256（p = 0.031）和0.0305（p = 0.007），说明在高补贴事件发生之前未观察到显著预趋势，而事件之后超额薪酬存在持续上行的动态响应。这表明表4-5的正向结果在识别边界收紧后仍然存在，但正文仍将其解释为较稳健的条件相关，而非无条件强因果效应。",
         "结论第3点",
         failures,
     )
 
     expect_absent(thesis_raw, "Power_FA 排名第5", "机器学习中的旧中介变量残留", failures)
+    expect_absent(thesis_raw, "Power_PCA", "PCA 口径残留", failures)
+    expect_absent(thesis_raw, "双主成分 PCA", "PCA 对照表述残留", failures)
+    expect_absent(thesis_raw, "主成分", "PCA 主成分表述残留", failures)
     expect_absent(thesis_raw, "5个输入特征", "机器学习中的旧五变量表述残留", failures)
     expect_absent(thesis_raw, "41,186条统一样本", "机器学习中的旧统一样本表述残留", failures)
+    expect_absent(thesis_raw, "主回归", "主回归措辞残留", failures)
+    expect_absent(thesis_raw, "安慰剂", "安慰剂措辞残留", failures)
     expect_absent(thesis_raw, "机器学习稳健性检验与 OLS/中介回归的对应关系", "旧机器学习总表残留", failures)
     expect_absent(thesis_raw, "替换解释变量口径（全样本 ln(1+Subsidy)）", "稳健性中的旧对照口径残留", failures)
     expect_absent(thesis_raw, "补贴系数降为0.0005", "稳健性中的旧不显著描述残留", failures)

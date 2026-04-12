@@ -20,6 +20,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT, WD_TAB_LEADER
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
+from docx.text.paragraph import Paragraph
 from docxcompose.composer import Composer
 from lxml import etree, html as lxml_html
 
@@ -863,18 +864,24 @@ def style_cover_and_titles(doc: Document, thesis_title: str, cover_info: dict[st
         college_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         apply_font(college_para, 16, bold=True, east_asia="仿宋", western="仿宋")
 
-    cover_table = doc.tables[0]
     cover_title = re.sub(r"\s+", "", cover_info.get("thesis_title", thesis_title))
     cover_title_text = format_chinese_title_lines(cover_title)
-    if "\n" in cover_title_text:
-        set_cover_cell_text(
-            cover_table.cell(0, 1),
-            cover_title_text,
-            size_pt=14,
-            align=WD_ALIGN_PARAGRAPH.LEFT,
-        )
-    else:
-        fill_cover_cell_text(cover_table.cell(0, 1), cover_title, size_pt=14)
+    cover_thesis_para = None
+    for paragraph in paragraphs[:30]:
+        text = normalize_text(paragraph.text)
+        if not text:
+            continue
+        if "毕业论文正文" in text or "届" in text or "信息科学与技术学院" in text:
+            continue
+        cover_thesis_para = paragraph
+        break
+    if cover_thesis_para is not None:
+        set_paragraph_text(cover_thesis_para, cover_title_text)
+        cover_thesis_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        apply_font(cover_thesis_para, 16, east_asia="黑体", western="黑体")
+
+    cover_table = doc.tables[0]
+    set_paragraph_text(cover_table.cell(0, 1).paragraphs[0], "")
     fill_cover_cell_text(cover_table.cell(1, 1), "", size_pt=12)
     fill_cover_cell_text(cover_table.cell(2, 0), "", size_pt=12)
     fill_cover_cell_text(cover_table.cell(3, 1), cover_info.get("student_name", ""))
@@ -942,6 +949,20 @@ def style_english_keywords_paragraph(paragraph, text: str) -> None:
     _set_run_font(content_run, western="Times New Roman", east_asia="Times New Roman")
 
 
+def insert_blank_paragraph_after(paragraph, *, line_spacing: float = 1.0):
+    new_p = OxmlElement("w:p")
+    paragraph._p.addnext(new_p)
+    new_para = Paragraph(new_p, paragraph._parent)
+    new_para.style = paragraph.part.document.styles["Normal"]
+    new_para.alignment = paragraph.alignment
+    fmt = new_para.paragraph_format
+    fmt.line_spacing = line_spacing
+    fmt.space_before = Pt(0)
+    fmt.space_after = Pt(0)
+    fmt.first_line_indent = Pt(0)
+    return new_para
+
+
 def set_cell_borders(cell, *, top: bool = False, bottom: bool = False) -> None:
     tc_pr = cell._tc.get_or_add_tcPr()
     borders = tc_pr.first_child_found_in("w:tcBorders")
@@ -992,15 +1013,22 @@ def style_table(table) -> None:
 def postprocess_abstract_docx(path: Path) -> None:
     doc = Document(path)
     in_english_abstract = False
+    english_title_para = None
+    abstract_heading_para = None
+    chinese_body_para = None
+    chinese_keywords_para = None
+    english_body_para = None
     for paragraph in doc.paragraphs:
         text = paragraph.text.strip()
         if not text:
             continue
         if text.startswith("关键词：") or text.startswith("关键词:"):
             style_keywords_paragraph(paragraph, text.replace("关键词:", "关键词："))
+            chinese_keywords_para = paragraph
             continue
         if text.upper() == "ABSTRACT":
             in_english_abstract = True
+            abstract_heading_para = paragraph
             paragraph.style = doc.styles["Normal"]
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             set_paragraph_basic_format(paragraph, first_indent=0)
@@ -1016,15 +1044,29 @@ def postprocess_abstract_docx(path: Path) -> None:
             set_paragraph_basic_format(paragraph, first_indent=0)
             paragraph.paragraph_format.page_break_before = True
             apply_font(paragraph, 16, bold=True, east_asia="Times New Roman", western="Times New Roman")
+            english_title_para = paragraph
             continue
         paragraph.style = doc.styles["Normal"]
         paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         if in_english_abstract:
             set_paragraph_basic_format(paragraph, first_indent=21)
             apply_font(paragraph, 10.5, east_asia="Times New Roman", western="Times New Roman")
+            english_body_para = paragraph
         else:
             set_paragraph_basic_format(paragraph, first_indent=CHINESE_ABSTRACT_FIRST_INDENT_PT)
             apply_font(paragraph, 10.5)
+            chinese_body_para = paragraph
+
+    if chinese_body_para is not None:
+        insert_blank_paragraph_after(chinese_body_para, line_spacing=1.0)
+    if chinese_keywords_para is not None:
+        insert_blank_paragraph_after(chinese_keywords_para, line_spacing=1.0)
+    if english_title_para is not None:
+        insert_blank_paragraph_after(english_title_para, line_spacing=1.0)
+    if abstract_heading_para is not None:
+        insert_blank_paragraph_after(abstract_heading_para, line_spacing=1.0)
+    if english_body_para is not None:
+        insert_blank_paragraph_after(english_body_para, line_spacing=1.0)
     doc.save(path)
 
 
