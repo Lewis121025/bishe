@@ -39,6 +39,9 @@ SAMPLE_SUMMARY_PATH = RESULTS_DIR / "sample_screening_summary.csv"
 MAIN_FE_PATH = RESULTS_DIR / "main_regression_fe_comparison.csv"
 ROBUSTNESS_PATH = RESULTS_DIR / "robustness_results.csv"
 HECKMAN_PATH = RESULTS_DIR / "heckman_results.csv"
+DESCRIPTIVE_STATS_PATH = RESULTS_DIR / "descriptive_statistics.csv"
+CAUSAL_RESULTS_PATH = RESULTS_DIR / "causal_results.csv"
+MAIN_MEDIATION_SUMMARY_PATH = RESULTS_DIR / "main_mediation_summary.csv"
 EVENT_STUDY_SUMMARY_PATH = RESULTS_DIR / "event_study_summary.json"
 EVENT_STUDY_RESULTS_PATH = RESULTS_DIR / "event_study_results.csv"
 
@@ -48,6 +51,7 @@ IMAGE_SOURCE_MAP = {
     "fig3_shap_summary_notitle.png": "fig3_shap_summary.png",
     "fig4_shap_subsidy_notitle.png": "fig4_shap_subsidy.png",
 }
+BUNDLE_ONLY_IMAGES = {"fig1_1_techroute.png"}
 
 
 def fmt_int(value: int | float) -> str:
@@ -112,22 +116,22 @@ def file_md5(path: Path) -> str:
 
 def check_bundle_images(thesis_raw: str, failures: list[str]) -> None:
     image_names = sorted(set(re.findall(r"!\[.*?\]\(\./images/([^)]+)\)", thesis_raw)))
-    expected_images = sorted(IMAGE_SOURCE_MAP.keys())
+    expected_images = sorted(set(IMAGE_SOURCE_MAP.keys()) | BUNDLE_ONLY_IMAGES)
     if image_names != expected_images:
         failures.append(f"[图片] 正文图片列表异常: {image_names}")
     for name in image_names:
         bundle_path = BUNDLE_IMAGES_DIR / name
-        result_path = RESULTS_DIR / IMAGE_SOURCE_MAP[name]
         if not bundle_path.exists():
             failures.append(f"[缺失] bundle 图片不存在: {bundle_path}")
             continue
+        if name in BUNDLE_ONLY_IMAGES:
+            continue
+        result_path = RESULTS_DIR / IMAGE_SOURCE_MAP[name]
         if not result_path.exists():
             failures.append(f"[缺失] results 图片不存在: {result_path}")
             continue
         # 正文使用 _notitle 图片以避免 DOCX 中图内标题与题注重复，
         # 因此这里只要求源图与正文图都存在，不强制哈希完全一致。
-        if name not in IMAGE_SOURCE_MAP and file_md5(bundle_path) != file_md5(result_path):
-            failures.append(f"[不同步] bundle 图片与 results 图片不一致: {name}")
 
 
 def check_reference_section(thesis_raw: str, failures: list[str]) -> None:
@@ -136,12 +140,12 @@ def check_reference_section(thesis_raw: str, failures: list[str]) -> None:
         return
     ref_text = thesis_raw.split("## 参考文献", 1)[1]
     ref_numbers = [int(x) for x in re.findall(r"^\[(\d+)\]", ref_text, flags=re.MULTILINE)]
-    expected = list(range(1, 30))
+    expected = list(range(1, 33))
     if ref_numbers != expected:
         failures.append(f"[参考文献] 编号异常: {ref_numbers}")
 
     whole_text_matches = {int(x) for x in re.findall(r"\[(\d+)\]", thesis_raw)}
-    for bad in (30, 31, 32, 33):
+    for bad in (33,):
         if bad in whole_text_matches:
             failures.append(f"[参考文献] 出现不允许的引用编号: [{bad}]")
 
@@ -156,8 +160,8 @@ def check_reference_section(thesis_raw: str, failures: list[str]) -> None:
 def check_table_and_figure_numbers(thesis_raw: str, failures: list[str]) -> None:
     table_labels = re.findall(r"\*\*表(\d+-\d+)", thesis_raw)
     figure_labels = re.findall(r"\*\*图(\d+-\d+)", thesis_raw)
-    expected_tables = ["3-1"] + [f"4-{i}" for i in range(1, 14)]
-    expected_figures = [f"4-{i}" for i in range(1, 5)]
+    expected_tables = ["3-1"] + [f"4-{i}" for i in range(1, 13)]
+    expected_figures = ["1-1"] + [f"4-{i}" for i in range(1, 5)]
     if table_labels != expected_tables:
         failures.append(f"[编号] 表格编号异常: {table_labels}")
     if figure_labels != expected_figures:
@@ -183,28 +187,104 @@ def check_docx_exists(failures: list[str]) -> None:
         return
 
     doc = Document(DOCX_PATH)
-    cover_title_candidates = []
-    for paragraph in doc.paragraphs[:30]:
-        text = paragraph.text.strip()
-        normalized = re.sub(r"\s+", "", text)
-        if not normalized:
-            continue
-        if "毕业论文正文" in normalized or "信息科学与技术学院" in normalized or "届" in normalized:
-            continue
-        if normalized == "摘要" or normalized == "目录":
-            continue
-        cover_title_candidates.append(text)
-    if not cover_title_candidates or "\n" not in cover_title_candidates[0]:
-        failures.append("[DOCX格式] 封面论文题目未按长题目手动换行")
+    expect_true(len(doc.sections) >= 4, "DOCX格式", f"分节数量异常: {len(doc.sections)}", failures)
+    for idx, section in enumerate(doc.sections):
+        expect_true(abs(section.top_margin.cm - 2.0) < 0.02, "DOCX格式", f"第{idx+1}节上边距不是2cm", failures)
+        expect_true(abs(section.bottom_margin.cm - 2.0) < 0.02, "DOCX格式", f"第{idx+1}节下边距不是2cm", failures)
+        expect_true(abs(section.left_margin.cm - 3.0) < 0.02, "DOCX格式", f"第{idx+1}节左边距不是3cm", failures)
+        expect_true(abs(section.right_margin.cm - 2.0) < 0.02, "DOCX格式", f"第{idx+1}节右边距不是2cm", failures)
+        expect_true(abs(section.header_distance.cm - 1.3) < 0.02, "DOCX格式", f"第{idx+1}节页眉边距不是1.3cm", failures)
+        expect_true(abs(section.footer_distance.cm - 1.1) < 0.02, "DOCX格式", f"第{idx+1}节页脚边距不是1.1cm", failures)
+
+    if not doc.tables:
+        failures.append("[DOCX格式] 未找到封面表格")
+    else:
+        cover_table = doc.tables[0]
+        cover_title_row1 = cover_table.cell(0, 1).paragraphs[0]
+        cover_title_row2 = cover_table.cell(1, 1).paragraphs[0] if len(cover_table.rows) > 1 else None
+        cover_title_text = "\n".join(
+            part
+            for part in [
+                cover_title_row1.text.strip(),
+                cover_title_row2.text.strip() if cover_title_row2 is not None else "",
+            ]
+            if part
+        )
+        if not cover_title_text:
+            failures.append("[DOCX格式] 封面论文题目缺失")
+        elif "\n" not in cover_title_text:
+            failures.append("[DOCX格式] 封面论文题目未按长题目手动换行")
+        if cover_title_row1.runs:
+            cover_run = cover_title_row1.runs[0]
+            expect_true(
+                abs((cover_run.font.size.pt if cover_run.font.size else 0) - 14.0) < 0.2,
+                "DOCX格式",
+                "封面论文题目不是四号",
+                failures,
+            )
+            expect_true(
+                cover_title_row1.alignment == 0,
+                "DOCX格式",
+                "长题目封面未左对齐",
+                failures,
+            )
 
     nonempty_paragraphs = [(idx, paragraph.text.strip()) for idx, paragraph in enumerate(doc.paragraphs) if paragraph.text.strip()]
+    paragraph_map = {paragraph.text.strip(): paragraph for paragraph in doc.paragraphs if paragraph.text.strip()}
+
+    def is_english_title_line(text: str) -> bool:
+        compact = re.sub(r"\s+", " ", text.strip())
+        return bool(compact) and compact == compact.upper() and bool(re.fullmatch(r"[A-Z0-9 ,:&'\-()]+", compact))
+
     for pos, (idx, text) in enumerate(nonempty_paragraphs):
         if text == "摘  要" and pos > 0 and "\n" not in nonempty_paragraphs[pos - 1][1]:
             failures.append("[DOCX格式] 中文摘要页论文题目未按长题目手动换行")
             break
-        if text == "ABSTRACT" and pos > 0 and "\n" not in nonempty_paragraphs[pos - 1][1]:
-            failures.append("[DOCX格式] 英文摘要页论文题目未按长题目手动换行")
-            break
+        if text == "ABSTRACT" and pos > 0:
+            prev_text = nonempty_paragraphs[pos - 1][1]
+            has_multiline_title = "\n" in prev_text
+            split_title_lines = 0
+            back = pos - 1
+            while back >= 0 and is_english_title_line(nonempty_paragraphs[back][1]):
+                split_title_lines += 1
+                back -= 1
+            if not has_multiline_title and split_title_lines < 2:
+                failures.append("[DOCX格式] 英文摘要页论文题目未按长题目手动换行")
+                break
+
+    abstract_title_para = next((p for p in doc.paragraphs if "\n" in p.text and "高管超额薪酬研究" in p.text), None)
+    if abstract_title_para is not None and abstract_title_para.runs:
+        run = abstract_title_para.runs[0]
+        expect_true(abs((run.font.size.pt if run.font.size else 0) - 16.0) < 0.2, "DOCX格式", "中文摘要页题目不是三号", failures)
+        expect_true(abstract_title_para.alignment == 1, "DOCX格式", "中文摘要页题目未居中", failures)
+
+    abstract_heading_para = paragraph_map.get("摘  要")
+    if abstract_heading_para is not None and abstract_heading_para.runs:
+        run = abstract_heading_para.runs[0]
+        expect_true(abs((run.font.size.pt if run.font.size else 0) - 14.0) < 0.2, "DOCX格式", "“摘 要”不是四号", failures)
+        expect_true(abstract_heading_para.alignment == 1, "DOCX格式", "“摘 要”未居中", failures)
+
+    english_title_paras = [p for p in doc.paragraphs if is_english_title_line(p.text.strip())]
+    for paragraph in english_title_paras[:3]:
+        if not paragraph.runs:
+            continue
+        run = paragraph.runs[0]
+        expect_true(abs((run.font.size.pt if run.font.size else 0) - 16.0) < 0.2, "DOCX格式", "英文题目不是三号", failures)
+        expect_true(bool(run.bold), "DOCX格式", "英文题目未加粗", failures)
+        expect_true(paragraph.alignment == 1, "DOCX格式", "英文题目未居中", failures)
+
+    english_abstract_heading = paragraph_map.get("ABSTRACT")
+    if english_abstract_heading is not None and english_abstract_heading.runs:
+        run = english_abstract_heading.runs[0]
+        expect_true(abs((run.font.size.pt if run.font.size else 0) - 14.0) < 0.2, "DOCX格式", "ABSTRACT 不是四号", failures)
+        expect_true(bool(run.bold), "DOCX格式", "ABSTRACT 未加粗", failures)
+        expect_true(english_abstract_heading.alignment == 1, "DOCX格式", "ABSTRACT 未居中", failures)
+
+    toc_title_para = paragraph_map.get("目  录")
+    if toc_title_para is not None and toc_title_para.runs:
+        run = toc_title_para.runs[0]
+        expect_true(abs((run.font.size.pt if run.font.size else 0) - 16.0) < 0.2, "DOCX格式", "目录标题不是三号", failures)
+        expect_true(toc_title_para.alignment == 1, "DOCX格式", "目录标题未居中", failures)
 
     toc_entries = []
     for paragraph in doc.paragraphs:
@@ -218,13 +298,62 @@ def check_docx_exists(failures: list[str]) -> None:
     if duplicates:
         failures.append(f"[DOCX目录] 目录条目重复，疑似更新域后生成了双目录: {duplicates[:5]}")
 
+    toc3_entries = [paragraph.text.strip() for paragraph in doc.paragraphs if (getattr(paragraph.style, "style_id", "") or "").lower().replace(" ", "") == "toc3"]
+    if toc3_entries:
+        expect_true(
+            all(text.count("\t") == 1 for text in toc3_entries),
+            "DOCX目录",
+            "TOC3 条目格式异常",
+            failures,
+        )
+
     with zipfile.ZipFile(DOCX_PATH) as zf:
         document_xml = zf.read("word/document.xml").decode("utf-8")
         settings_xml = zf.read("word/settings.xml").decode("utf-8")
+        footer_xml_map = {
+            name: zf.read(name).decode("utf-8")
+            for name in zf.namelist()
+            if re.fullmatch(r"word/footer\d+\.xml", name)
+        }
     if "<w:txbxContent" in document_xml:
         failures.append("[DOCX格式] 文档仍包含模板说明文本框")
     if "w:updateFields" not in settings_xml:
         failures.append("[DOCX格式] 未设置打开时更新域 updateFields")
+    footer_blob = "\n".join(footer_xml_map.values())
+    if "PAGE" not in footer_blob or "SECTIONPAGES" not in footer_blob:
+        failures.append("[DOCX格式] 正文页脚未保留动态页码域 PAGE / SECTIONPAGES")
+
+    abstract_headers = [section.header.paragraphs[0].text for section in doc.sections[1:4] if section.header.paragraphs]
+    if len(abstract_headers) >= 3:
+        expect_true("摘 要" in abstract_headers[0], "DOCX格式", "摘要页页眉异常", failures)
+        expect_true("目 录" in abstract_headers[1], "DOCX格式", "目录页页眉异常", failures)
+        expect_true("论文正文" in abstract_headers[2], "DOCX格式", "正文页页眉异常", failures)
+
+    important_blank_indices: list[int] = []
+    for idx, paragraph in enumerate(doc.paragraphs):
+        text = paragraph.text.strip()
+        if text == "摘  要":
+            important_blank_indices.extend([idx - 1, idx + 1])
+        elif text == "ABSTRACT":
+            important_blank_indices.extend([idx - 1, idx + 1])
+        elif text.startswith("关键词：") or text.startswith("关键词:"):
+            important_blank_indices.append(idx + 1)
+        elif text.startswith("Keywords:"):
+            important_blank_indices.append(idx + 1)
+    for idx in sorted({x for x in important_blank_indices if 0 <= x < len(doc.paragraphs)}):
+        paragraph = doc.paragraphs[idx]
+        if paragraph.text.strip():
+            failures.append(f"[DOCX格式] 预期空行位置 {idx} 不是空段")
+            continue
+        if "sectPr" in paragraph._p.xml:
+            continue
+        if not paragraph.runs:
+            continue
+        run = paragraph.runs[0]
+        if run.font.size is None:
+            continue
+        size = run.font.size.pt
+        expect_true(abs(size - 10.5) < 0.2, "DOCX格式", f"前置关键空行 {idx} 不是五号字体", failures)
 
     math_number_sequence: list[int] = []
     math_root = None
@@ -260,6 +389,52 @@ def check_docx_exists(failures: list[str]) -> None:
                 math_number_sequence.append(int(match.group(1)))
     if math_number_sequence and math_number_sequence != list(range(1, len(math_number_sequence) + 1)):
         failures.append(f"[DOCX公式] 公式编号缓存不连续: {math_number_sequence}")
+
+    body_heading1 = next(
+        (
+            p for p in doc.paragraphs
+            if p.style and p.style.name == "Heading 1" and p.text.strip().startswith("第一章 ")
+        ),
+        None,
+    )
+    if body_heading1 is not None and body_heading1.runs:
+        run = body_heading1.runs[0]
+        expect_true(abs((run.font.size.pt if run.font.size else 0) - 16.0) < 0.2, "DOCX格式", "一级标题不是三号", failures)
+        expect_true(body_heading1.alignment == 1, "DOCX格式", "一级标题未居中", failures)
+
+    body_heading2 = next(
+        (
+            p for p in doc.paragraphs
+            if p.style and p.style.name == "Heading 2" and re.match(r"^\d+\.\d+\s+", p.text.strip())
+        ),
+        None,
+    )
+    if body_heading2 is not None and body_heading2.runs:
+        run = body_heading2.runs[0]
+        expect_true(abs((run.font.size.pt if run.font.size else 0) - 14.0) < 0.2, "DOCX格式", "二级标题不是四号", failures)
+        expect_true(body_heading2.alignment == 0, "DOCX格式", "二级标题未顶格", failures)
+        expect_true(not bool(run.bold), "DOCX格式", "二级标题不应加粗", failures)
+
+    body_heading3 = next((p for p in doc.paragraphs if re.match(r"^\d+\.\d+\.\d+\s+", p.text.strip())), None)
+    if body_heading3 is not None and body_heading3.runs:
+        run = body_heading3.runs[0]
+        expect_true(abs((run.font.size.pt if run.font.size else 0) - 12.0) < 0.2, "DOCX格式", "三级标题不是小四", failures)
+        expect_true(abs((body_heading3.paragraph_format.first_line_indent.pt if body_heading3.paragraph_format.first_line_indent else 0) - 21.0) < 0.5, "DOCX格式", "三级标题缩进不是两个汉字", failures)
+        expect_true(not bool(run.bold), "DOCX格式", "三级标题不应加粗", failures)
+
+    first_caption = next((p for p in doc.paragraphs if re.match(r"^(表|图)\d", p.text.strip())), None)
+    if first_caption is not None and first_caption.runs:
+        run = first_caption.runs[0]
+        expect_true(abs((run.font.size.pt if run.font.size else 0) - 9.0) < 0.2, "DOCX格式", "图表题不是小五", failures)
+        expect_true(bool(run.bold), "DOCX格式", "图表题未加粗", failures)
+        expect_true(first_caption.alignment == 1, "DOCX格式", "图表题未居中", failures)
+
+    ref_heading_idx = next((idx for idx, p in enumerate(doc.paragraphs) if p.text.strip() == "参考文献"), None)
+    if ref_heading_idx is not None:
+        first_ref = next((p for p in doc.paragraphs[ref_heading_idx + 1 :] if p.text.strip()), None)
+        if first_ref is not None and first_ref.runs:
+            run = first_ref.runs[0]
+            expect_true(abs((run.font.size.pt if run.font.size else 0) - 10.5) < 0.2, "DOCX格式", "参考文献字体不是五号", failures)
 
 
 def build_results() -> dict:
@@ -310,13 +485,13 @@ def build_results() -> dict:
     heckman = _fit_heckman_two_step(df, controls, subsidy_col=ALT_SUBSIDY_LAG_COL)
 
     mediation_df = positive_df.dropna(
-        subset=["Overpay", "Power_FA", ALT_SUBSIDY_LAG_COL, "Year"] + controls
+        subset=["Overpay", "Power_PCA", ALT_SUBSIDY_LAG_COL, "Year"] + controls
     ).copy()
     mediation_df = mediation_df.set_index(["Symbol", "Year"], drop=False)
     X3 = mediation_df[[ALT_SUBSIDY_LAG_COL] + controls]
     m3 = _fit_with_cluster_se(mediation_df["Overpay"], X3)
-    m4 = _fit_with_cluster_se(mediation_df["Power_FA"], X3)
-    X5 = mediation_df[[ALT_SUBSIDY_LAG_COL, "Power_FA"] + controls]
+    m4 = _fit_with_cluster_se(mediation_df["Power_PCA"], X3)
+    X5 = mediation_df[[ALT_SUBSIDY_LAG_COL, "Power_PCA"] + controls]
     m5 = _fit_with_cluster_se(mediation_df["Overpay"], X5)
 
     placebo_df = df.sort_values(["Symbol", "Year"]).copy()
@@ -389,6 +564,32 @@ def check_result_exports(res: dict, failures: list[str]) -> None:
         if not unified_row.empty:
             expect_true(int(unified_row.iloc[0]["observations"]) == int(len(res["mediation_df"])), "sample_screening_summary", "中介统一样本量未同步", failures)
             expect_true("lnSubsidy_pos_l1" in str(unified_row.iloc[0]["note"]), "sample_screening_summary", "中介样本说明未同步到正补助口径", failures)
+            expect_true("Power_PCA" in str(unified_row.iloc[0]["note"]), "sample_screening_summary", "中介样本说明未同步到 PCA 口径", failures)
+
+    if not DESCRIPTIVE_STATS_PATH.exists():
+        failures.append(f"[缺失] 结果文件不存在: {DESCRIPTIVE_STATS_PATH}")
+    else:
+        desc_df = pd.read_csv(DESCRIPTIVE_STATS_PATH)
+        power_row = desc_df.loc[desc_df["变量"] == "管理层权力(Power, PCA口径)"]
+        expect_true(not power_row.empty, "descriptive_statistics", "描述性统计未同步为 PCA 口径", failures)
+
+    if not CAUSAL_RESULTS_PATH.exists():
+        failures.append(f"[缺失] 结果文件不存在: {CAUSAL_RESULTS_PATH}")
+    else:
+        causal_df = pd.read_csv(CAUSAL_RESULTS_PATH)
+        expect_true("中介效应PCA" in set(causal_df["category"]), "causal_results", "中介结果未同步为 PCA 口径", failures)
+        expect_true("lnSubsidy_pos_l1→Power_PCA" in set(causal_df["key_var"]), "causal_results", "路径a未同步为 Power_PCA", failures)
+        expect_true("Power_PCA→Overpay" in set(causal_df["key_var"]), "causal_results", "路径b未同步为 Power_PCA", failures)
+
+    if not MAIN_MEDIATION_SUMMARY_PATH.exists():
+        failures.append(f"[缺失] 结果文件不存在: {MAIN_MEDIATION_SUMMARY_PATH}")
+    else:
+        mediation_summary = pd.read_csv(MAIN_MEDIATION_SUMMARY_PATH)
+        expect_true(len(mediation_summary) == 1, "main_mediation_summary", f"行数异常: {len(mediation_summary)}", failures)
+        if len(mediation_summary) == 1:
+            row = mediation_summary.iloc[0]
+            expect_true(str(row["mediator_method"]) == "PCA", "main_mediation_summary", "中介方法未同步为 PCA", failures)
+            expect_true(str(row["power_measure_method"]) == "PCA", "main_mediation_summary", "权力口径未同步为 PCA", failures)
 
     if not MAIN_FE_PATH.exists():
         failures.append(f"[缺失] 结果文件不存在: {MAIN_FE_PATH}")
@@ -526,14 +727,12 @@ def check_thesis_against_results(thesis_raw: str, failures: list[str], res: dict
     expect(thesis_raw, f"<tr><td>4</td><td>{shap_rows[3]['变量']}</td><td>{fmt_plain(shap_rows[3]['平均绝对SHAP值'], 6)}</td></tr>", "表4-9 行4", failures)
 
     expect(thesis_raw, f"<tr><td>模型3 总效应 c：lnSubsidy_pos_l1 → Overpay</td><td>{fmt_coef(res['m3'].params[ALT_SUBSIDY_LAG_COL], res['m3'].pvalues[ALT_SUBSIDY_LAG_COL])}</td><td>{fmt_plain(res['m3'].tstats[ALT_SUBSIDY_LAG_COL], 4)}</td><td>{fmt_plain(res['m3'].pvalues[ALT_SUBSIDY_LAG_COL], 4)}</td></tr>", "表4-10 模型3", failures)
-    expect(thesis_raw, f"<tr><td>模型4 路径 a：lnSubsidy_pos_l1 → Power（FA）</td><td>{fmt_coef(res['m4'].params[ALT_SUBSIDY_LAG_COL], res['m4'].pvalues[ALT_SUBSIDY_LAG_COL])}</td><td>{fmt_plain(res['m4'].tstats[ALT_SUBSIDY_LAG_COL], 4)}</td><td>{fmt_plain(res['m4'].pvalues[ALT_SUBSIDY_LAG_COL], 4)}</td></tr>", "表4-10 模型4", failures)
-    expect(thesis_raw, f"<tr><td>模型5 路径 b：Power（FA） → Overpay</td><td>{fmt_coef(res['m5'].params['Power_FA'], res['m5'].pvalues['Power_FA'])}</td><td>{fmt_plain(res['m5'].tstats['Power_FA'], 4)}</td><td>{fmt_plain(res['m5'].pvalues['Power_FA'], 4)}</td></tr>", "表4-10 模型5-b", failures)
+    expect(thesis_raw, f"<tr><td>模型4 路径 a：lnSubsidy_pos_l1 → Power（PCA）</td><td>{fmt_coef(res['m4'].params[ALT_SUBSIDY_LAG_COL], res['m4'].pvalues[ALT_SUBSIDY_LAG_COL])}</td><td>{fmt_plain(res['m4'].tstats[ALT_SUBSIDY_LAG_COL], 4)}</td><td>{fmt_plain(res['m4'].pvalues[ALT_SUBSIDY_LAG_COL], 4)}</td></tr>", "表4-10 模型4", failures)
+    expect(thesis_raw, f"<tr><td>模型5 路径 b：Power（PCA） → Overpay</td><td>{fmt_coef(res['m5'].params['Power_PCA'], res['m5'].pvalues['Power_PCA'])}</td><td>{fmt_plain(res['m5'].tstats['Power_PCA'], 4)}</td><td>{fmt_plain(res['m5'].pvalues['Power_PCA'], 4)}</td></tr>", "表4-10 模型5-b", failures)
     expect(thesis_raw, f"<tr><td>模型5 直接效应 c'：lnSubsidy_pos_l1 → Overpay</td><td>{fmt_coef(res['m5'].params[ALT_SUBSIDY_LAG_COL], res['m5'].pvalues[ALT_SUBSIDY_LAG_COL])}</td><td>{fmt_plain(res['m5'].tstats[ALT_SUBSIDY_LAG_COL], 4)}</td><td>{fmt_plain(res['m5'].pvalues[ALT_SUBSIDY_LAG_COL], 4)}</td></tr>", "表4-10 模型5-c'", failures)
 
     expect(thesis_raw, "<tr><td>lnSubsidy_pos_l1</td><td>0.0046（1.04）</td><td>0.0135***（2.91）</td></tr>", "表4-11 主系数", failures)
     expect(thesis_raw, "<tr><td>lnSubsidy_pos_l1</td><td>−0.0020（−0.36）</td><td>0.0110***（2.90）</td></tr>", "表4-12 主系数", failures)
-    expect(thesis_raw, "<tr><td>lnSubsidy_pos_l1</td><td>0.0049（0.59）</td><td>0.0002（0.03）</td></tr>", "表4-13 主系数", failures)
-
     event_summary = res["event_study_summary"]
     event_rows = res["event_study_rows"].set_index("event_time")
     expect(
@@ -544,28 +743,27 @@ def check_thesis_against_results(thesis_raw: str, failures: list[str], res: dict
     )
     expect(
         thesis_raw,
-        f"联合检验结果显示，事件发生前两期和前三期的系数并不显著，前趋势联合检验的 p 值为{float(event_summary['pretrend_p']):.3f}，说明在进入高补贴状态之前，处理组与对照组并未表现出系统性差异。与之相对，事件当期及随后1至3期的系数分别为{fmt_fixed(event_rows.loc[0, 'coef'])}（p {fmt_p_text(event_rows.loc[0, 'p_value'])}）、{fmt_fixed(event_rows.loc[1, 'coef'])}（p {fmt_p_text(event_rows.loc[1, 'p_value'])}）、{fmt_fixed(event_rows.loc[2, 'coef'])}（p {fmt_p_text(event_rows.loc[2, 'p_value'])}）和{fmt_fixed(event_rows.loc[3, 'coef'])}（p {fmt_p_text(event_rows.loc[3, 'p_value'])}），均为正且达到常见显著性标准。",
+        f"联合检验结果显示，事件发生前两期和前三期的系数并不显著，前趋势联合检验的 p 值为{float(event_summary['pretrend_p']):.3f}，说明在进入高补贴状态之前，处理组与对照组没有明显差别。事件当期及随后1至3期的系数分别为{fmt_fixed(event_rows.loc[0, 'coef'])}（p {fmt_p_text(event_rows.loc[0, 'p_value'])}）、{fmt_fixed(event_rows.loc[1, 'coef'])}（p {fmt_p_text(event_rows.loc[1, 'p_value'])}）、{fmt_fixed(event_rows.loc[2, 'coef'])}（p {fmt_p_text(event_rows.loc[2, 'p_value'])}）和{fmt_fixed(event_rows.loc[3, 'coef'])}（p {fmt_p_text(event_rows.loc[3, 'p_value'])}），均为正且达到常见显著性标准。",
         "事件研究结果段落",
         failures,
     )
 
     expect(
         thesis_raw,
-        "（2）**基准回归在多种稳健性设定下保持正向显著，且异质性结果较为清晰。** 将因变量替换为高管前三名薪酬对数后，补贴强度系数为0.0331（p < 0.001）；样本期缩短至2010—2020年后，系数为0.0120（p = 0.003）；仅保留制造业样本后，系数为0.0099（p = 0.023）；引入行业×年份固定效应后，系数仍为0.0082（p = 0.013）。产权与行业分组进一步表明，正向关联主要集中在私营企业（0.0135，p = 0.004）和非管制行业（0.0110，p = 0.004），而国有企业、管制行业以及央地国企内部都未形成稳健显著结果。",
+        "（2）**基准回归在多种稳健性设定下保持正向显著，异质性结果也较为清晰。** 将因变量替换为高管前三名薪酬对数后，补贴强度系数为0.0331（p < 0.001）；样本期缩短至2010—2020年后，系数为0.0120（p = 0.003）；仅保留制造业样本后，系数为0.0099（p = 0.023）；引入行业×年份固定效应后，系数仍为0.0082（p = 0.013）。产权与行业分组表明，正向关联主要集中在私营企业（0.0135，p = 0.004）和非管制行业（0.0110，p = 0.004），国有企业、管制行业以及央地国企内部都未形成稳健显著结果。",
         "结论第2点",
         failures,
     )
     expect(
         thesis_raw,
-        "（3）**选择偏差校正和事件研究式动态检验均未改变基准回归方向，但因果解释仍需保持谨慎。** 基准回归口径下，Heckman 两步法中的逆米尔斯比率显著（p = 0.0056），校正后的补贴系数仍为0.0093（p = 0.008），提示主结果不宜简单归因于样本选择。进一步看，事件研究中的前趋势联合检验 p 值为0.669，事件当期及随后1至3期的系数分别为0.0235（p = 0.034）、0.0268（p = 0.018）、0.0256（p = 0.031）和0.0305（p = 0.007），说明在高补贴事件发生之前未观察到显著预趋势，而事件之后超额薪酬存在持续上行的动态响应。这表明表4-5的正向结果在识别边界收紧后仍然存在，但正文仍将其解释为较稳健的条件相关，而非无条件强因果效应。",
+        "（3）**选择偏差校正和事件研究式动态检验均未改变基准回归方向，因果解释仍需保持谨慎。** 基准回归口径下，Heckman 两步法中的逆米尔斯比率显著（p = 0.0056），校正后的补贴系数仍为0.0093（p = 0.008），说明主结果不宜简单归因于样本选择。进一步看，事件研究中的前趋势联合检验 p 值为0.669，事件当期及随后1至3期的系数分别为0.0235（p = 0.034）、0.0268（p = 0.018）、0.0256（p = 0.031）和0.0305（p = 0.007），表明高补贴事件发生前未观察到显著预趋势，事件之后超额薪酬则出现持续上行。表4-5的正向结果在识别边界收紧后仍然存在，正文仍把它解释为较稳健的条件相关，而非无条件强因果效应。",
         "结论第3点",
         failures,
     )
 
-    expect_absent(thesis_raw, "Power_FA 排名第5", "机器学习中的旧中介变量残留", failures)
-    expect_absent(thesis_raw, "Power_PCA", "PCA 口径残留", failures)
-    expect_absent(thesis_raw, "双主成分 PCA", "PCA 对照表述残留", failures)
-    expect_absent(thesis_raw, "主成分", "PCA 主成分表述残留", failures)
+    expect_absent(thesis_raw, "Power_FA", "FA 口径残留", failures)
+    expect_absent(thesis_raw, "Power（FA）", "FA 表述残留", failures)
+    expect_absent(thesis_raw, "因子分析", "FA 方法表述残留", failures)
     expect_absent(thesis_raw, "5个输入特征", "机器学习中的旧五变量表述残留", failures)
     expect_absent(thesis_raw, "41,186条统一样本", "机器学习中的旧统一样本表述残留", failures)
     expect_absent(thesis_raw, "主回归", "主回归措辞残留", failures)

@@ -11,7 +11,7 @@
 - `vif_results.csv`：多重共线性检验
 - `diagnostics_summary.json`：正文会引用的模型诊断值汇总（如模型1调整后R²、模型2 F统计量、VIF 最大值/均值）
 - `causal_results.csv`：固定效应、滞后项与工具变量相关结果
-- `main_mediation_summary.csv`：FA 口径管理层权力中介效应汇总
+- `main_mediation_summary.csv`：PCA 口径管理层权力中介效应汇总
 - `robustness_results.csv`：稳健性检验结果
 - `heterogeneity_ownership_results.csv`：按产权性质分组的主回归结果
 - `heterogeneity_mechanism_results.csv`：按行业管制、央地分类分组的主回归结果

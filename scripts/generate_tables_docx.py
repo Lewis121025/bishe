@@ -222,7 +222,7 @@ def build_desc_table_docx(doc, df):
         "lnSale": "企业规模(lnSale)",
         "IA": "无形资产占比(IA)",
         "Overpay": "超额薪酬(Overpay)",
-        "Power": "管理层权力(Power, FA口径)",
+        "Power": "管理层权力(Power, PCA口径)",
         "Roa": "资产收益率(Roa)",
         "Lever": "财务杠杆(Lever)",
         "Top1": "第一大股东持股比例(Top1)",
@@ -407,12 +407,12 @@ def build_mediation_table_docx(doc, df):
     model3 = results["model3"]
     model4 = results["model4"]
     model5 = results["model5"]
-    add_table_title(doc, "表5  管理层权力的中介效应检验结果（模型3至模型5，FA口径）")
+    add_table_title(doc, "表5  管理层权力的中介效应检验结果（模型3至模型5，PCA口径）")
 
     rows = [
         (f"模型3 总效应 c：{BASE_SUBSIDY_LAG_COL} → Overpay", format_coef(summary["coef_c"], summary["p_c"]), f"{_get_std_error(model3, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
-        (f"模型4 路径 a：{BASE_SUBSIDY_LAG_COL} → Power（FA）", format_coef(summary["coef_a"], summary["p_a"]), f"{_get_std_error(model4, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
-        ("模型5 路径 b：Power（FA） → Overpay", format_coef(summary["coef_b"], summary["p_b"]), f"{_get_std_error(model5, 'Power'):.4f}", "—"),
+        (f"模型4 路径 a：{BASE_SUBSIDY_LAG_COL} → Power（PCA）", format_coef(summary["coef_a"], summary["p_a"]), f"{_get_std_error(model4, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
+        ("模型5 路径 b：Power（PCA） → Overpay", format_coef(summary["coef_b"], summary["p_b"]), f"{_get_std_error(model5, 'Power'):.4f}", "—"),
         (f"模型5 直接效应 c'：{BASE_SUBSIDY_LAG_COL} → Overpay", format_coef(summary["coef_c_prime"], summary["p_c_prime"]), f"{_get_std_error(model5, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
         ("间接效应 a×b", f"{summary['indirect_effect']:.6f}", "—", f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}]"),
         ("Sobel p 值", f"{summary['sobel_p']:.4f}", "—", "—"),

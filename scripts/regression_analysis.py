@@ -1195,7 +1195,7 @@ def _compute_descriptive_statistics(df):
         ("lnSale", "企业规模(lnSale)"),
         ("IA", "无形资产占比(IA)"),
         ("Overpay", "超额薪酬(Overpay)"),
-        ("Power", "管理层权力(Power, FA口径)"),
+        ("Power", "管理层权力(Power, PCA口径)"),
         ("Roa", "业绩(Roa)"),
         ("Lever", "财务杠杆"),
         ("Top1", "第一大股东持股比例"),
@@ -1289,7 +1289,7 @@ def compute_overpay(df):
 
 
 # ============================================================
-# 第五部分：管理层权力 Power（FA 经验性综合口径，PCA 为对照）
+# 第五部分：管理层权力 Power（PCA 综合口径）
 # ============================================================
 
 def _calc_shared_factor_diagnostics(df_complete, power_vars):
@@ -1400,7 +1400,7 @@ def _compute_pca_power(standardized_df, power_vars):
 
 
 def _compute_fa_power(standardized_df, power_vars):
-    """因子分析主口径：提取前两个公因子，旋转后按方差贡献率合成为综合得分。"""
+    """保留历史 FA 辅助计算函数，当前正文不再采用该口径。"""
     n_factors = min(2, len(power_vars))
     fa_result = Factor(standardized_df.to_numpy(), n_factor=n_factors, method="pa").fit()
     if n_factors >= 2:
@@ -1459,14 +1459,14 @@ def _compute_fa_power(standardized_df, power_vars):
 def compute_power(df, return_diagnostics=False):
     """
     管理层权力构造：
-      1. FA（因子分析）作为正文采用的经验性综合口径
-      2. PCA 作为对照口径：提取前两个主成分并形成综合得分
+      1. PCA（主成分分析）作为正文采用的综合口径
+      2. 保留 Power 别名，便于后续回归与表格代码复用
     """
     print("\n" + "=" * 70)
-    print("第五部分：管理层权力综合指标（FA经验性综合口径，PCA为对照）")
+    print("第五部分：管理层权力综合指标（PCA口径）")
     print("=" * 70)
 
-    # Tenure 在旧口径下共同度极低，因此从 FA/PCA 综合指标中剔除。
+    # Tenure 在旧口径下代表性较弱，因此从 Power 综合指标中剔除。
     power_vars = ["Dual", "Boardsize", "Insider", "Mgshder"]
     for var in power_vars:
         missing = df[var].isna().sum()
@@ -1478,8 +1478,8 @@ def compute_power(df, return_diagnostics=False):
 
     diagnostics = {
         "power_vars": power_vars,
-        "main_method": "FA",
-        "main_power_col": "Power_FA",
+        "main_method": "PCA",
+        "main_power_col": "Power_PCA",
         "pca": {},
         "fa": {},
     }
@@ -1515,23 +1515,19 @@ def compute_power(df, return_diagnostics=False):
         f"{pca_result['explained_variance_ratio_pc1']:.4f} + {pca_result['explained_variance_ratio_pc2']:.4f}"
     )
     print(f"  PCA 前两主成分累计方差贡献率 = {pca_result['cum_explained_variance_pc2']:.4f}")
-    print("  解释：PCA 对照口径使用前两个主成分加权形成综合得分，以避免单一主成分代表性不足。")
-    print(f"\n  FA 前两因子累计方差解释率 = {fa_result['variance_explained_ratio']:.4f}")
-    print(f"  FA 平均共同度 = {diagnostics['fa']['average_communality']:.4f}")
-    print("  解释：FA 以前两个经 varimax 旋转的公因子按载荷平方和占比合成为经验性综合口径，仍需结合较低 KMO 审慎解读。")
-
+    print("  解释：PCA 口径使用前两个主成分按方差贡献率加权形成综合得分，以避免单一主成分代表性不足。")
     score_df = pd.DataFrame({
         "Symbol": df_power["Symbol"].to_numpy(),
         "Year": df_power["Year"].to_numpy(),
         "Power_PCA": pca_result["scores"].to_numpy(),
         "Power_FA": fa_result["scores"].to_numpy(),
     })
-    score_df["Power"] = score_df["Power_FA"]
+    score_df["Power"] = score_df["Power_PCA"]
 
     df = df.merge(score_df, on=["Symbol", "Year"], how="left")
     df.attrs["power_diagnostics"] = diagnostics
 
-    print(f"\nPower（FA口径）描述:")
+    print(f"\nPower（PCA口径）描述:")
     print(df["Power"].describe().to_string())
 
     return (df, diagnostics) if return_diagnostics else df
@@ -2334,7 +2330,7 @@ def _run_event_study(df, control_vars, threshold_quantile=EVENT_STUDY_THRESHOLD_
     }
 
 
-def _summarize_mediation(label, m3, m4, m5, sample_size, n_clusters, mediator_col="Power", mediator_method="FA", subsidy_col=MAIN_SUBSIDY_LAG_COL):
+def _summarize_mediation(label, m3, m4, m5, sample_size, n_clusters, mediator_col="Power", mediator_method="PCA", subsidy_col=MAIN_SUBSIDY_LAG_COL):
     """汇总 Baron & Kenny 路径系数、Sobel 与 bootstrap 所需字段。"""
     coef_c = m3.params.get(subsidy_col, np.nan)
     p_c = m3.pvalues.get(subsidy_col, np.nan)
@@ -2458,7 +2454,7 @@ def _augment_summary_with_bootstrap(fit_result, reps, seed, subsidy_col=MAIN_SUB
     return fit_result
 
 
-def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay", mediator_col="Power", mediator_method="FA", subsidy_col=MAIN_SUBSIDY_LAG_COL):
+def _run_mediation_models(df_sub, label, control_vars, dep_var="Overpay", mediator_col="Power", mediator_method="PCA", subsidy_col=MAIN_SUBSIDY_LAG_COL):
     """在给定样本上统一拟合模型3/4/5并汇总中介效应。"""
     core3 = [subsidy_col] + control_vars
     core4 = [subsidy_col, mediator_col] + control_vars
@@ -2547,13 +2543,12 @@ def _print_subsample_model2(label, fit_result, subsidy_col=MAIN_SUBSIDY_LAG_COL)
 
 
 def _build_power_method_comparison(df, control_vars, power_diagnostics=None):
-    """比较 FA 与 PCA 两种 Power 构造在全样本中的中介结果。"""
+    """输出正文采用的 PCA 口径中介结果摘要。"""
     power_diagnostics = power_diagnostics or {}
     power_vars = power_diagnostics.get("power_vars", ["Dual", "Boardsize", "Insider", "Mgshder"])
     rows = []
     method_specs = [
-        {"method": "FA", "role": "正文口径（经验性综合指标）", "power_col": "Power_FA", "diag_key": "fa"},
-        {"method": "PCA", "role": "对照口径（前两主成分加权综合得分）", "power_col": "Power_PCA", "diag_key": "pca"},
+        {"method": "PCA", "role": "正文口径（前两主成分加权综合得分）", "power_col": "Power_PCA", "diag_key": "pca"},
     ]
 
     for spec in method_specs:
@@ -2574,9 +2569,7 @@ def _build_power_method_comparison(df, control_vars, power_diagnostics=None):
             fit_result,
             reps=MAIN_MEDIATION_BOOTSTRAP_REPS,
             seed=(
-                _stable_seed_from_text("全样本")
-                if spec["method"] == "FA"
-                else _stable_seed_from_text(f"PowerMethod::{spec['method']}")
+                _stable_seed_from_text(f"PowerMethod::{spec['method']}")
             ),
         )
         summary = fit_result["summary"]
@@ -2585,10 +2578,7 @@ def _build_power_method_comparison(df, control_vars, power_diagnostics=None):
         if not diag_source.empty:
             standardized = _standardize_power_inputs(diag_source, power_vars)
             shared_diag = _calc_shared_factor_diagnostics(standardized, power_vars)
-            if spec["method"] == "FA":
-                diag = {**shared_diag, **_compute_fa_power(standardized, power_vars)}
-            else:
-                diag = {**shared_diag, **_compute_pca_power(standardized, power_vars)}
+            diag = {**shared_diag, **_compute_pca_power(standardized, power_vars)}
         rows.append({
             "method": spec["method"],
             "role": spec["role"],
@@ -2598,9 +2588,7 @@ def _build_power_method_comparison(df, control_vars, power_diagnostics=None):
             "kmo": diag.get("kmo_overall", np.nan),
             "bartlett_p": diag.get("bartlett_p", np.nan),
             "primary_variance_ratio": (
-                diag.get("variance_explained_ratio", np.nan)
-                if spec["method"] == "FA"
-                else diag.get("cum_explained_variance_pc2", np.nan)
+                diag.get("cum_explained_variance_pc2", np.nan)
             ),
             "coef_a": summary["coef_a"],
             "p_a": summary["p_a"],
@@ -2651,7 +2639,7 @@ def run_regressions(df, power_diagnostics=None):
         "全样本",
         control_vars,
         mediator_col="Power",
-        mediator_method="FA",
+        mediator_method="PCA",
         subsidy_col=MAIN_SUBSIDY_LAG_COL,
     )
     if fit_result is None:
@@ -2662,7 +2650,7 @@ def run_regressions(df, power_diagnostics=None):
         seed=_stable_seed_from_text("全样本"),
         subsidy_col=MAIN_SUBSIDY_LAG_COL,
     )
-    fit_result["summary"]["power_measure_method"] = "FA"
+    fit_result["summary"]["power_measure_method"] = "PCA"
     df_unified = main_df.dropna(
         subset=[MAIN_SUBSIDY_LAG_COL, "Power"] + control_vars + ["Overpay", "IndustrySector", "Year"]
     ).copy()
@@ -2766,7 +2754,7 @@ def run_regressions(df, power_diagnostics=None):
 
     # ---- 模型4：补贴对管理层权力 ----
     print("\n" + "-" * 50)
-    print(f"模型4: Power[FA] = f({MAIN_SUBSIDY_LAG_COL}, Controls, Firm FE, Year FE)")
+    print(f"模型4: Power[PCA] = f({MAIN_SUBSIDY_LAG_COL}, Controls, Firm FE, Year FE)")
     print("-" * 50)
     core4 = [MAIN_SUBSIDY_LAG_COL] + control_vars
     model4 = fit_result["m5"]
@@ -2774,7 +2762,7 @@ def run_regressions(df, power_diagnostics=None):
 
     # ---- 模型5：加入管理层权力后的中介回归 ----
     print("\n" + "-" * 50)
-    print(f"模型5: Overpay = f({MAIN_SUBSIDY_LAG_COL}, Power[FA], Controls, Firm FE, Year FE)")
+    print(f"模型5: Overpay = f({MAIN_SUBSIDY_LAG_COL}, Power[PCA], Controls, Firm FE, Year FE)")
     print("-" * 50)
     core5 = [MAIN_SUBSIDY_LAG_COL, "Power"] + control_vars
     model5 = fit_result["m4"]
@@ -3119,8 +3107,8 @@ def build_analysis_dataset(data_dir):
     sample_summary.append(
         _sample_stage_row(
             "可用于构造 Power 的样本",
-            df.dropna(subset=["Power_FA"]).copy(),
-            note="四个管理层权力底层指标同时完整，采用 FA 口径构造 Power",
+            df.dropna(subset=["Power_PCA"]).copy(),
+            note="四个管理层权力底层指标同时完整，采用 PCA 口径构造 Power",
         )
     )
     df.attrs["sample_screening_summary"] = sample_summary
@@ -3245,7 +3233,7 @@ def save_structured_outputs(
             _sample_stage_row(
                 "中介统一样本",
                 unified_df,
-                note="中介模型统一样本，要求 Overpay、Power_FA 与 lnSubsidy_pos_l1 同时完整",
+                note="中介模型统一样本，要求 Overpay、Power_PCA 与 lnSubsidy_pos_l1 同时完整",
             )
         )
     if sample_summary:
@@ -3298,30 +3286,30 @@ def save_structured_outputs(
         })
     if model4 is not None:
         causal_rows.append({
-            "category": "中介效应FA",
+            "category": "中介效应PCA",
             "model": "模型4-路径a",
-            "key_var": f"{MAIN_SUBSIDY_LAG_COL}→Power_FA",
+            "key_var": f"{MAIN_SUBSIDY_LAG_COL}→Power_PCA",
             "coef": float(mediation.get("coef_a", np.nan)),
             "se": float(model4.std_errors.get(MAIN_SUBSIDY_LAG_COL, np.nan)),
             "p": float(mediation.get("p_a", np.nan)),
             "n": int(mediation.get("sample_size", np.nan)),
             "r2": float(model4.rsquared),
-            "note": "FA口径；公司固定效应+年份固定效应",
+            "note": "PCA口径；公司固定效应+年份固定效应",
         })
     if model5 is not None:
         causal_rows.append({
-            "category": "中介效应FA",
+            "category": "中介效应PCA",
             "model": "模型5-路径b",
-            "key_var": "Power_FA→Overpay",
+            "key_var": "Power_PCA→Overpay",
             "coef": float(mediation.get("coef_b", np.nan)),
             "se": float(model5.std_errors.get("Power", np.nan)),
             "p": float(mediation.get("p_b", np.nan)),
             "n": int(mediation.get("sample_size", np.nan)),
             "r2": float(model5.rsquared),
-            "note": "FA口径；公司固定效应+年份固定效应",
+            "note": "PCA口径；公司固定效应+年份固定效应",
         })
         causal_rows.append({
-            "category": "中介效应FA",
+            "category": "中介效应PCA",
             "model": "模型5-直接效应",
             "key_var": f"{MAIN_SUBSIDY_LAG_COL}→Overpay|Power",
             "coef": float(mediation.get("coef_c_prime", np.nan)),
@@ -3329,11 +3317,11 @@ def save_structured_outputs(
             "p": float(mediation.get("p_c_prime", np.nan)),
             "n": int(mediation.get("sample_size", np.nan)),
             "r2": float(model5.rsquared),
-            "note": "FA口径；公司固定效应+年份固定效应",
+            "note": "PCA口径；公司固定效应+年份固定效应",
         })
     if model3 is not None:
         causal_rows.append({
-            "category": "中介效应FA",
+            "category": "中介效应PCA",
             "model": "模型3-总效应",
             "key_var": f"{MAIN_SUBSIDY_LAG_COL}→Overpay",
             "coef": float(mediation.get("coef_c", np.nan)),
@@ -3341,10 +3329,10 @@ def save_structured_outputs(
             "p": float(mediation.get("p_c", np.nan)),
             "n": int(mediation.get("sample_size", np.nan)),
             "r2": float(model3.rsquared),
-            "note": "FA口径；公司固定效应+年份固定效应",
+            "note": "PCA口径；公司固定效应+年份固定效应",
         })
     causal_rows.append({
-        "category": "中介效应FA",
+        "category": "中介效应PCA",
         "model": "间接效应a×b",
         "key_var": "indirect",
         "coef": float(mediation.get("indirect_effect", np.nan)),

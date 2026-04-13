@@ -137,14 +137,14 @@ def build_mediation_table(df):
     lines = []
     lines.append("")
     lines.append("=" * 90)
-    lines.append("表5  管理层权力的中介效应检验结果（模型3至模型5，FA口径）")
+    lines.append("表5  管理层权力的中介效应检验结果（模型3至模型5，PCA口径）")
     lines.append("=" * 90)
     lines.append(f"{'路径':<34} {'系数':<16} {'标准误(cluster)':<18} {'Bootstrap 95%CI':<18}")
     lines.append("-" * 90)
     rows = [
         (f"模型3 总效应 c：{BASE_SUBSIDY_LAG_COL} → Overpay", format_coef(summary["coef_c"], summary["p_c"]), f"{_get_std_error(model3, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
-        (f"模型4 路径 a：{BASE_SUBSIDY_LAG_COL} → Power（FA）", format_coef(summary["coef_a"], summary["p_a"]), f"{_get_std_error(model4, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
-        ("模型5 路径 b：Power（FA） → Overpay", format_coef(summary["coef_b"], summary["p_b"]), f"{_get_std_error(model5, 'Power'):.4f}", "—"),
+        (f"模型4 路径 a：{BASE_SUBSIDY_LAG_COL} → Power（PCA）", format_coef(summary["coef_a"], summary["p_a"]), f"{_get_std_error(model4, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
+        ("模型5 路径 b：Power（PCA） → Overpay", format_coef(summary["coef_b"], summary["p_b"]), f"{_get_std_error(model5, 'Power'):.4f}", "—"),
         (f"模型5 直接效应 c'：{BASE_SUBSIDY_LAG_COL} → Overpay", format_coef(summary["coef_c_prime"], summary["p_c_prime"]), f"{_get_std_error(model5, BASE_SUBSIDY_LAG_COL):.4f}", "—"),
         ("间接效应 a×b", f"{summary['indirect_effect']:.6f}", "—", f"[{summary['bootstrap_ci_lower']:.6f}, {summary['bootstrap_ci_upper']:.6f}]"),
         ("Sobel p 值", f"{summary['sobel_p']:.4f}", "—", "—"),
@@ -267,7 +267,7 @@ def build_power_method_comparison_table(main_results):
             f"{row['method']:<12} {row['role']:<18} {coef_b:<18} {ci:<34} {row['mediation_type']}"
         )
     lines.append("=" * 110)
-    lines.append("注：FA 为正文采用的经验性综合口径，PCA 为删除 Tenure 后以前两个主成分加权形成的对照口径。bootstrap 95%CI 为公司层面 cluster bootstrap（300 次）得到的 95% 置信区间。")
+    lines.append("注：当前正文采用 PCA 口径，Power 由前两个主成分按方差贡献率加权形成。bootstrap 95%CI 为公司层面 cluster bootstrap（300 次）得到的 95% 置信区间。")
     return "\n".join(lines)
 
 
@@ -346,7 +346,7 @@ def build_desc_table(df):
         "lnSale": "企业规模(lnSale)",
         "IA": "无形资产占比(IA)",
         "Overpay": "超额薪酬(Overpay)",
-        "Power": "管理层权力(Power, FA口径)",
+        "Power": "管理层权力(Power, PCA口径)",
         "Roa": "业绩(Roa)",
         "Lever": "财务杠杆",
         "Top1": "第一大股东持股比例",

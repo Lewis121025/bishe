@@ -3,7 +3,7 @@
 1. 公司+年份双向FE（当期补贴）
 2. 公司+年份双向FE（滞后一期补贴）
 3. 工具变量2SLS（同行业同城市其他公司补贴均值为IV）
-4. FA口径管理层权力中介效应（公司FE）
+4. PCA口径管理层权力中介效应（公司FE）
 """
 
 import csv, math, os, random, sys
@@ -29,7 +29,7 @@ with open(DATA) as f:
 
 print(f"Total rows: {len(rows)}")
 
-# ── 构建回归样本（主回归口径：有Power_FA的样本）────────────────────────────────
+# ── 构建回归样本（管理层权力口径：Power_PCA）────────────────────────────────
 def make_sample(rows, require_lag=False):
     """构建回归所需样本，按公司-年份索引"""
     # 先建一个按(Symbol, Year)→row的字典，用于匹配滞后期
@@ -52,7 +52,7 @@ def make_sample(rows, require_lag=False):
 
         overpay = to_float(r.get('Overpay'))
         lnsub   = to_float(r.get('lnSubsidy'))
-        power   = to_float(r.get('Power_FA'))
+        power   = to_float(r.get('Power_PCA'))
         roa     = to_float(r.get('Roa'))
         lever   = to_float(r.get('Lever'))
         top1    = to_float(r.get('Top1'))
@@ -258,20 +258,20 @@ X2_2sls[:, 0] = lnsub_hat_dm
 b_2nd, se_2nd, t_2nd, n_2nd, r2_2nd = ols_cluster(y2_dm, X2_2sls, sym_iv)
 print(f"  第二阶段 lnSubsidy: β={b_2nd[0]:.4f}, SE={se_2nd[0]:.4f}, t={t_2nd[0]:.4f}, N={n_2nd}")
 
-# ── 回归4：FA口径中介效应（公司FE）──────────────────────────────────────────
-print("\n=== 回归4: FA口径中介效应（公司FE）===")
+# ── 回归4：PCA口径中介效应（公司FE）──────────────────────────────────────────
+print("\n=== 回归4: PCA口径中介效应（公司FE）===")
 
 # 总效应 c：Overpay ~ lnSubsidy + controls（公司FE）
 bc, sec, tc, nc, r2c = run_twoway_fe(sample_main)
 c_total = bc[0]
 print(f"  总效应 c: β={c_total:.4f}, t={tc[0]:.4f}")
 
-# 路径a：Power_FA ~ lnSubsidy + controls（公司FE）
+# 路径a：Power_PCA ~ lnSubsidy + controls（公司FE）
 ba, sea, ta, na, r2a = run_twoway_fe(sample_main, y_var='power', x_var='lnsub')
 a_path = ba[0]
 print(f"  路径a (lnsub→Power): β={a_path:.4f}, t={ta[0]:.4f}")
 
-# 直接效应 c' + 路径b：Overpay ~ lnSubsidy + Power_FA + controls（公司FE）
+# 直接效应 c' + 路径b：Overpay ~ lnSubsidy + Power_PCA + controls（公司FE）
 bcp, secp, tcp, ncp, r2cp = run_twoway_fe(sample_main, extra_x=['power'])
 c_prime = bcp[0]
 b_path  = bcp[1]
