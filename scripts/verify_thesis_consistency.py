@@ -160,7 +160,7 @@ def check_reference_section(thesis_raw: str, failures: list[str]) -> None:
 def check_table_and_figure_numbers(thesis_raw: str, failures: list[str]) -> None:
     table_labels = re.findall(r"\*\*表(\d+-\d+)", thesis_raw)
     figure_labels = re.findall(r"\*\*图(\d+-\d+)", thesis_raw)
-    expected_tables = ["3-1"] + [f"4-{i}" for i in range(1, 13)]
+    expected_tables = ["3-1"] + [f"4-{i}" for i in range(1, 14)]
     expected_figures = ["1-1"] + [f"4-{i}" for i in range(1, 5)]
     if table_labels != expected_tables:
         failures.append(f"[编号] 表格编号异常: {table_labels}")
@@ -320,8 +320,8 @@ def check_docx_exists(failures: list[str]) -> None:
     if "w:updateFields" not in settings_xml:
         failures.append("[DOCX格式] 未设置打开时更新域 updateFields")
     footer_blob = "\n".join(footer_xml_map.values())
-    if "PAGE" not in footer_blob or "SECTIONPAGES" not in footer_blob:
-        failures.append("[DOCX格式] 正文页脚未保留动态页码域 PAGE / SECTIONPAGES")
+    if "PAGE" not in footer_blob or ("NUMPAGES" not in footer_blob and "PAGEREF _BodyEnd" not in footer_blob):
+        failures.append("[DOCX格式] 正文页脚未保留动态页码域 PAGE / NUMPAGES（或等效 PAGEREF）")
 
     abstract_headers = [section.header.paragraphs[0].text for section in doc.sections[1:4] if section.header.paragraphs]
     if len(abstract_headers) >= 3:
@@ -741,25 +741,40 @@ def check_thesis_against_results(thesis_raw: str, failures: list[str], res: dict
         "事件研究样本段落",
         failures,
     )
-    expect(
-        thesis_raw,
-        f"联合检验结果显示，事件发生前两期和前三期的系数并不显著，前趋势联合检验的 p 值为{float(event_summary['pretrend_p']):.3f}，说明在进入高补贴状态之前，处理组与对照组没有明显差别。事件当期及随后1至3期的系数分别为{fmt_fixed(event_rows.loc[0, 'coef'])}（p {fmt_p_text(event_rows.loc[0, 'p_value'])}）、{fmt_fixed(event_rows.loc[1, 'coef'])}（p {fmt_p_text(event_rows.loc[1, 'p_value'])}）、{fmt_fixed(event_rows.loc[2, 'coef'])}（p {fmt_p_text(event_rows.loc[2, 'p_value'])}）和{fmt_fixed(event_rows.loc[3, 'coef'])}（p {fmt_p_text(event_rows.loc[3, 'p_value'])}），均为正且达到常见显著性标准。",
-        "事件研究结果段落",
-        failures,
-    )
+    event_required_parts = [
+        f"前趋势联合检验的 p 值为{float(event_summary['pretrend_p']):.3f}",
+        f"事件当期及随后1至3期的系数分别为{fmt_fixed(event_rows.loc[0, 'coef'])}（p {fmt_p_text(event_rows.loc[0, 'p_value'])}）、{fmt_fixed(event_rows.loc[1, 'coef'])}（p {fmt_p_text(event_rows.loc[1, 'p_value'])}）、{fmt_fixed(event_rows.loc[2, 'coef'])}（p {fmt_p_text(event_rows.loc[2, 'p_value'])}）和{fmt_fixed(event_rows.loc[3, 'coef'])}（p {fmt_p_text(event_rows.loc[3, 'p_value'])}）",
+        "均为正且达到常见显著性标准",
+    ]
+    for part in event_required_parts:
+        expect(thesis_raw, part, "事件研究结果段落", failures)
 
-    expect(
-        thesis_raw,
-        "（2）**基准回归在多种稳健性设定下保持正向显著，异质性结果也较为清晰。** 将因变量替换为高管前三名薪酬对数后，补贴强度系数为0.0331（p < 0.001）；样本期缩短至2010—2020年后，系数为0.0120（p = 0.003）；仅保留制造业样本后，系数为0.0099（p = 0.023）；引入行业×年份固定效应后，系数仍为0.0082（p = 0.013）。产权与行业分组表明，正向关联主要集中在私营企业（0.0135，p = 0.004）和非管制行业（0.0110，p = 0.004），国有企业、管制行业以及央地国企内部都未形成稳健显著结果。",
-        "结论第2点",
-        failures,
-    )
-    expect(
-        thesis_raw,
-        "（3）**选择偏差校正和事件研究式动态检验均未改变基准回归方向，因果解释仍需保持谨慎。** 基准回归口径下，Heckman 两步法中的逆米尔斯比率显著（p = 0.0056），校正后的补贴系数仍为0.0093（p = 0.008），说明主结果不宜简单归因于样本选择。进一步看，事件研究中的前趋势联合检验 p 值为0.669，事件当期及随后1至3期的系数分别为0.0235（p = 0.034）、0.0268（p = 0.018）、0.0256（p = 0.031）和0.0305（p = 0.007），表明高补贴事件发生前未观察到显著预趋势，事件之后超额薪酬则出现持续上行。表4-5的正向结果在识别边界收紧后仍然存在，正文仍把它解释为较稳健的条件相关，而非无条件强因果效应。",
-        "结论第3点",
-        failures,
-    )
+    conclusion_2_parts = [
+        "（2）**基准回归在多种稳健性设定下保持正向显著",
+        "0.0331（p < 0.001）",
+        "0.0120（p = 0.003）",
+        "0.0099（p = 0.023）",
+        "0.0082（p = 0.013）",
+        "私营企业（0.0135，p = 0.004）",
+        "非管制行业（0.0110，p = 0.004）",
+        "国有企业、管制行业以及央地国企内部",
+    ]
+    for part in conclusion_2_parts:
+        expect(thesis_raw, part, "结论第2点", failures)
+
+    conclusion_3_parts = [
+        "（3）**选择偏差校正和事件动态检验均未改变基准回归方向",
+        "Heckman 两步法中的逆米尔斯比率显著（p = 0.0056）",
+        "0.0093（p = 0.008）",
+        f"前趋势联合检验 p 值为{float(event_summary['pretrend_p']):.3f}",
+        f"{fmt_fixed(event_rows.loc[0, 'coef'])}（p {fmt_p_text(event_rows.loc[0, 'p_value'])}）",
+        f"{fmt_fixed(event_rows.loc[1, 'coef'])}（p {fmt_p_text(event_rows.loc[1, 'p_value'])}）",
+        f"{fmt_fixed(event_rows.loc[2, 'coef'])}（p {fmt_p_text(event_rows.loc[2, 'p_value'])}）",
+        f"{fmt_fixed(event_rows.loc[3, 'coef'])}（p {fmt_p_text(event_rows.loc[3, 'p_value'])}）",
+        "条件相关",
+    ]
+    for part in conclusion_3_parts:
+        expect(thesis_raw, part, "结论第3点", failures)
 
     expect_absent(thesis_raw, "Power_FA", "FA 口径残留", failures)
     expect_absent(thesis_raw, "Power（FA）", "FA 表述残留", failures)

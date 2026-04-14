@@ -23,12 +23,14 @@ from docx.shared import Cm, Pt
 from docx.text.paragraph import Paragraph
 from docxcompose.composer import Composer
 from lxml import etree, html as lxml_html
+from PIL import Image, ImageDraw, ImageFont
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SOURCE_MD = ROOT_DIR / "thesis_final_bundle" / "thesis_final_humanized_v2.md"
 PREPROCESSED_MD = ROOT_DIR / "thesis_final_bundle" / "thesis_final_humanized_v2_pandoc.md"
 OUTPUT_DOCX = ROOT_DIR / "thesis_final_bundle" / "thesis_final_humanized_v2.docx"
+TABLE_IMAGE_DIR = ROOT_DIR / "thesis_final_bundle" / "generated_tables"
 REFERENCE_DOC = ROOT_DIR / "09 【模板 2026届】 论文正文（信息科学与技术学院）.docx"
 KAITI_MD = ROOT_DIR / "kaiti.md"
 KAITI_REPORT_DOCX = ROOT_DIR / "彭晓俞_开题报告 (1).docx"
@@ -36,6 +38,8 @@ KAITI_REPORT_DOCX = ROOT_DIR / "彭晓俞_开题报告 (1).docx"
 COVER_TITLE = "本 科 生 毕 业 论 文 正 文"
 DEFAULT_COHORT_TEXT = "（ 2026 届）"
 COLLEGE_TEXT = "信息科学与技术学院"
+HEADER_LEFT_TEXT = "本科生毕业设计（论文）"
+HEADER_SPACER = "                                                                    "
 CHINESE_ABSTRACT_FIRST_INDENT_PT = 17.9
 TEMPLATE_DEBUG_FILES = (
     ROOT_DIR / "thesis_final_bundle" / "_pandoc_one_shot.docx",
@@ -337,9 +341,173 @@ def html_table_to_pipe(table_html: str) -> str:
     return "\n".join(lines)
 
 
+def table_image_widths(column_count: int, header_text: str) -> list[float]:
+    if column_count == 8:
+        return [2.4, 1.8, 1.7, 1.5, 1.2, 1.2, 1.5, 1.0]
+    if column_count == 7:
+        return [4.2, 1.6, 1.7, 1.7, 1.7, 1.7, 1.7]
+    if column_count == 6:
+        return [3.6, 2.6, 2.6, 1.6, 1.8, 1.4]
+    if column_count == 5:
+        return [3.2, 3.7, 3.3, 2.9, 1.8]
+    if column_count == 4:
+        return [3.8, 3.4, 3.4, 3.4]
+    if column_count == 3:
+        if "定义" in header_text:
+            return [3.7, 2.7, 8.6]
+        if "排名" in header_text:
+            return [2.0, 6.0, 4.0]
+        return [4.0, 5.0, 5.0]
+    if column_count == 2:
+        return [6.0, 6.0]
+    return [1.0] * max(column_count, 1)
+
+
+def load_table_font(size: int, *, bold: bool = False):
+    candidates = [
+        "/System/Library/Fonts/STHeiti Medium.ttc" if bold else "/System/Library/Fonts/Songti.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    ]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return ImageFont.truetype(candidate, size)
+    return ImageFont.load_default()
+
+
+def text_width(draw: ImageDraw.ImageDraw, text: str, font) -> int:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0]
+
+
+def wrap_table_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list[str]:
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return [""]
+    lines: list[str] = []
+    current = ""
+    for char in text:
+        candidate = current + char
+        if current and text_width(draw, candidate, font) > max_width:
+            lines.append(current)
+            current = char
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def parse_html_table_rows(table_html: str) -> tuple[list[list[dict[str, object]]], int]:
+    root = lxml_html.fragment_fromstring(table_html, create_parent="div")
+    table = root.xpath(".//table")[0]
+    parsed_rows: list[list[dict[str, object]]] = []
+    column_count = 0
+    for row in table.xpath(".//tr"):
+        cells = []
+        row_span = 0
+        for cell in row.xpath("./th|./td"):
+            text = re.sub(r"\s+", " ", " ".join(cell.itertext())).strip()
+            colspan_match = re.search(r"\d+", cell.get("colspan", "1") or "1")
+            colspan = int(colspan_match.group(0)) if colspan_match else 1
+            cells.append({"text": text, "colspan": colspan})
+            row_span += colspan
+        if cells:
+            parsed_rows.append(cells)
+            column_count = max(column_count, row_span)
+    return parsed_rows, column_count
+
+
+def render_html_table_image(table_html: str, output_path: Path) -> None:
+    rows, column_count = parse_html_table_rows(table_html)
+    if not rows or column_count == 0:
+        raise ValueError("遇到无法解析的空表格。")
+
+    canvas_width = 1800
+    margin_x = 42
+    margin_y = 28
+    padding_x = 12
+    padding_y = 9
+    font = load_table_font(34)
+    bold_font = load_table_font(34, bold=True)
+    line_height = 48
+    drawable = Image.new("RGB", (canvas_width, 200), "white")
+    draw = ImageDraw.Draw(drawable)
+
+    ratios = table_image_widths(column_count, " ".join(str(cell["text"]) for cell in rows[0]))
+    total_ratio = sum(ratios)
+    table_width = canvas_width - margin_x * 2
+    column_widths = [int(table_width * ratio / total_ratio) for ratio in ratios]
+    column_widths[-1] += table_width - sum(column_widths)
+
+    wrapped_rows: list[list[dict[str, object]]] = []
+    row_heights: list[int] = []
+    for r_idx, row in enumerate(rows):
+        wrapped_row = []
+        cursor = 0
+        row_height = 0
+        for cell in row:
+            colspan = int(cell["colspan"])
+            span_width = sum(column_widths[cursor : cursor + colspan])
+            cell_font = bold_font if r_idx == 0 else font
+            lines = wrap_table_text(draw, str(cell["text"]), cell_font, span_width - padding_x * 2)
+            wrapped_row.append({"lines": lines, "colspan": colspan})
+            row_height = max(row_height, len(lines) * line_height + padding_y * 2)
+            cursor += colspan
+        wrapped_rows.append(wrapped_row)
+        row_heights.append(max(row_height, line_height + padding_y * 2))
+
+    canvas_height = margin_y * 2 + sum(row_heights) + 8
+    image = Image.new("RGB", (canvas_width, canvas_height), "white")
+    draw = ImageDraw.Draw(image)
+    x0 = margin_x
+    y = margin_y
+    rule_width = 3
+
+    draw.line((x0, y, x0 + table_width, y), fill="black", width=rule_width)
+    for r_idx, row in enumerate(wrapped_rows):
+        cursor = 0
+        row_top = y
+        row_height = row_heights[r_idx]
+        for cell in row:
+            colspan = int(cell["colspan"])
+            span_width = sum(column_widths[cursor : cursor + colspan])
+            lines = cell["lines"]
+            cell_font = bold_font if r_idx == 0 else font
+            block_height = len(lines) * line_height
+            text_y = row_top + (row_height - block_height) / 2
+            left = x0 + sum(column_widths[:cursor])
+            is_first_column = cursor == 0
+            for line in lines:
+                line_width = text_width(draw, line, cell_font)
+                if is_first_column and colspan == 1:
+                    text_x = left + padding_x
+                else:
+                    text_x = left + (span_width - line_width) / 2
+                draw.text((text_x, text_y), line, fill="black", font=cell_font)
+                text_y += line_height
+            cursor += colspan
+        y += row_height
+        if r_idx == 0:
+            draw.line((x0, y, x0 + table_width, y), fill="black", width=rule_width)
+    draw.line((x0, y, x0 + table_width, y), fill="black", width=rule_width)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output_path)
+
+
 def convert_html_tables(text: str) -> str:
-    pattern = re.compile(r"<table>.*?</table>", re.DOTALL | re.IGNORECASE)
-    return pattern.sub(lambda match: "\n\n" + html_table_to_pipe(match.group(0)) + "\n\n", text)
+    pattern = re.compile(r"<table\b[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE)
+    table_index = 0
+
+    def replace_table(match: re.Match[str]) -> str:
+        nonlocal table_index
+        table_index += 1
+        image_path = TABLE_IMAGE_DIR / f"table_{table_index:02d}.png"
+        render_html_table_image(match.group(0), image_path)
+        rel_path = image_path.relative_to(SOURCE_MD.parent).as_posix()
+        return f"\n\n![]({rel_path}){{width=15.5cm}}\n\n"
+
+    return pattern.sub(replace_table, text)
 
 
 def superscript_body_citations_markdown(text: str) -> str:
@@ -359,6 +527,10 @@ def superscript_body_citations_markdown(text: str) -> str:
 
 
 def build_pandoc_body_markdown(body_text: str) -> str:
+    if TABLE_IMAGE_DIR.exists():
+        for old_image in TABLE_IMAGE_DIR.glob("table_*.png"):
+            old_image.unlink()
+    TABLE_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     body = strip_rules(body_text)
     body = normalize_caption_lines(body)
     body = reorder_figure_caption_blocks(body)
@@ -455,6 +627,31 @@ def set_cover_cell_text(cell, text: str, *, size_pt: float = 12, align=WD_ALIGN_
     paragraph.paragraph_format.line_spacing = 1.3
     set_paragraph_text(paragraph, text)
     apply_font(paragraph, size_pt, east_asia="楷体", western="楷体")
+
+
+def set_cover_title_cell_text(cell, text: str, *, size_pt: float = 14) -> None:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        lines = [""]
+
+    for paragraph in cell.paragraphs[1:]:
+        parent = paragraph._element.getparent()
+        if parent is not None:
+            parent.remove(paragraph._element)
+
+    first_paragraph = cell.paragraphs[0]
+    target_paragraphs = [first_paragraph]
+    while len(target_paragraphs) < len(lines):
+        target_paragraphs.append(cell.add_paragraph())
+
+    for idx, paragraph in enumerate(target_paragraphs):
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT if len(lines) > 1 else WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.paragraph_format.first_line_indent = Pt(0)
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.line_spacing = 1.0
+        set_paragraph_text(paragraph, lines[idx] if idx < len(lines) else "")
+        apply_font(paragraph, size_pt, east_asia="楷体", western="楷体")
 
 
 def fill_cover_cell_text(cell, text: str, *, size_pt: float = 12) -> None:
@@ -594,6 +791,12 @@ def remove_block_range(doc: Document, start_idx: int, end_idx: int) -> None:
         doc.element.body.remove(element)
 
 
+def remove_paragraph(paragraph) -> None:
+    parent = paragraph._element.getparent()
+    if parent is not None:
+        parent.remove(paragraph._element)
+
+
 def set_paragraph_basic_format(paragraph, *, line_spacing: float = 1.3, first_indent: float = 0) -> None:
     fmt = paragraph.paragraph_format
     fmt.line_spacing = line_spacing
@@ -617,7 +820,7 @@ def style_toc_styles(doc: Document) -> None:
                 break
         if level is None:
             continue
-        style.paragraph_format.line_spacing = 1.3
+        style.paragraph_format.line_spacing = Pt(14)
         style.paragraph_format.space_before = Pt(0)
         style.paragraph_format.space_after = Pt(0)
         style.paragraph_format.left_indent = Pt(indent_by_level[level])
@@ -659,6 +862,76 @@ def extract_existing_toc_page_cache(path: Path) -> dict[str, str]:
         if title and page:
             page_cache[title] = page
     return page_cache
+
+
+def render_docx_to_pdf(docx_path: Path, output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = output_dir / "_lo_profile"
+    subprocess.run(
+        [
+            "soffice",
+            f"-env:UserInstallation=file://{profile_dir}",
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            str(output_dir),
+            str(docx_path),
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    pdf_path = output_dir / f"{docx_path.stem}.pdf"
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"未生成 PDF：{pdf_path}")
+    return pdf_path
+
+
+def build_pdf_toc_page_cache(docx_path: Path, titles: list[str]) -> dict[str, str]:
+    if not titles or shutil.which("soffice") is None or shutil.which("pdfinfo") is None or shutil.which("pdftotext") is None:
+        return {}
+
+    with tempfile.TemporaryDirectory(prefix="toc_page_cache_") as tmp_dir_name:
+        tmp_dir = Path(tmp_dir_name)
+        pdf_path = render_docx_to_pdf(docx_path, tmp_dir)
+        pdfinfo = subprocess.run(
+            ["pdfinfo", str(pdf_path)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ).stdout
+        match = re.search(r"Pages:\s+(\d+)", pdfinfo)
+        if not match:
+            return {}
+
+        total_pages = int(match.group(1))
+        normalized_titles = {normalize_text(title): title for title in titles if title.strip()}
+        page_cache: dict[str, str] = {}
+
+        for pdf_page in range(1, total_pages + 1):
+            page_text = subprocess.run(
+                ["pdftotext", "-f", str(pdf_page), "-l", str(pdf_page), str(pdf_path), "-"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ).stdout
+            footer_match = re.search(r"第\s*(\d+)\s*页", page_text)
+            if not footer_match:
+                continue
+
+            logical_page = footer_match.group(1)
+            normalized_page_text = normalize_text(page_text)
+            for normalized_title, raw_title in normalized_titles.items():
+                if raw_title in page_cache or not normalized_title:
+                    continue
+                if normalized_title in normalized_page_text:
+                    page_cache[raw_title] = logical_page
+
+        return page_cache
 
 
 def toc_level_for_heading(text: str) -> int | None:
@@ -716,6 +989,62 @@ def add_heading_bookmark(paragraph, name: str, bookmark_id: int) -> None:
     paragraph._p.append(end)
 
 
+def add_body_end_bookmark(doc: Document, name: str = "_BodyEnd") -> None:
+    for paragraph in reversed(doc.paragraphs):
+        if paragraph.text.strip():
+            add_heading_bookmark(paragraph, name, max_bookmark_id(doc) + 1)
+            return
+    raise ValueError("未找到可用于标记正文末页的段落。")
+
+
+def insert_section_break_before(paragraph, sect_pr_template) -> None:
+    new_paragraph = OxmlElement("w:p")
+    p_pr = OxmlElement("w:pPr")
+    sect_pr = deepcopy(sect_pr_template)
+    for child in list(sect_pr):
+        if element_tag(child) == "pgNumType":
+            sect_pr.remove(child)
+    p_pr.append(sect_pr)
+    new_paragraph.append(p_pr)
+    paragraph._p.addprevious(new_paragraph)
+
+
+def split_body_for_back_matter(doc: Document) -> None:
+    references_para = next((p for p in doc.paragraphs if p.text.strip() == "参考文献"), None)
+    acknowledgements_para = next((p for p in doc.paragraphs if p.text.strip() == "致谢"), None)
+    if references_para is None or acknowledgements_para is None:
+        raise ValueError("未找到参考文献或致谢标题，无法拆分页眉分节。")
+
+    references_para.paragraph_format.page_break_before = False
+    acknowledgements_para.paragraph_format.page_break_before = False
+
+    body_sect_template = deepcopy(doc.sections[-1]._sectPr)
+    insert_section_break_before(references_para, body_sect_template)
+    insert_section_break_before(acknowledgements_para, body_sect_template)
+
+
+def set_section_header_text(section, right_text: str) -> None:
+    section.header.is_linked_to_previous = False
+    paragraphs = section.header.paragraphs
+    header_paragraph = paragraphs[0] if paragraphs else section.header.add_paragraph()
+    for paragraph in paragraphs[1:]:
+        parent = paragraph._element.getparent()
+        if parent is not None:
+            parent.remove(paragraph._element)
+    header_paragraph.style = section.part.document.styles["Header"]
+    set_paragraph_text(header_paragraph, f"{HEADER_LEFT_TEXT}{HEADER_SPACER}{right_text} ")
+    header_paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+
+def configure_back_matter_headers(doc: Document) -> None:
+    if len(doc.sections) < 6:
+        raise ValueError(f"分节数量不足，当前仅 {len(doc.sections)} 节，无法单独设置参考文献和致谢页眉。")
+
+    set_section_header_text(doc.sections[3], "论文正文")
+    set_section_header_text(doc.sections[4], "参考文献")
+    set_section_header_text(doc.sections[5], "致谢")
+
+
 def _append_toc_run(parent, text: str = "", *, hyperlink_style: bool = False, web_hidden: bool = False):
     run = OxmlElement("w:r")
     r_pr = OxmlElement("w:rPr")
@@ -738,7 +1067,13 @@ def _append_toc_run(parent, text: str = "", *, hyperlink_style: bool = False, we
     return run
 
 
-def _append_toc_field(parent, instr: str, result_text: str | None = None) -> None:
+def _append_toc_field(
+    parent,
+    instr: str,
+    result_text: str | None = None,
+    *,
+    result_web_hidden: bool = False,
+) -> None:
     begin_run = _append_toc_run(parent, web_hidden=True)
     begin = OxmlElement("w:fldChar")
     begin.set(qn("w:fldCharType"), "begin")
@@ -756,7 +1091,7 @@ def _append_toc_field(parent, instr: str, result_text: str | None = None) -> Non
     sep_run.append(sep)
 
     if result_text is not None:
-        _append_toc_run(parent, result_text, web_hidden=True)
+        _append_toc_run(parent, result_text, web_hidden=result_web_hidden)
 
     end_run = _append_toc_run(parent, web_hidden=True)
     end = OxmlElement("w:fldChar")
@@ -787,28 +1122,28 @@ def build_template_toc_paragraph(
     hyperlink.set(qn("w:history"), "1")
     for part in re.split(r"(\s+)", title):
         if part:
-            _append_toc_run(hyperlink, part, hyperlink_style=True)
+            _append_toc_run(hyperlink, part)
 
-    tab_run = _append_toc_run(hyperlink, web_hidden=True)
-    tab_run.append(OxmlElement("w:tab"))
-    _append_toc_field(hyperlink, f"PAGEREF {bookmark_name} \\h", page_result)
     paragraph.append(hyperlink)
+    tab_run = _append_toc_run(paragraph)
+    tab_run.append(OxmlElement("w:tab"))
+    _append_toc_run(paragraph, page_result)
     return paragraph
 
 
 def heading_entries_for_template_toc(doc: Document) -> list[dict[str, str | int]]:
     entries: list[dict[str, str | int]] = []
-    body_started = False
     next_id = max_bookmark_id(doc) + 1
     remove_auto_toc_bookmarks(doc)
 
-    for paragraph in doc.paragraphs:
-        text = re.sub(r"\s+", " ", paragraph.text.strip())
-        if text.startswith("第一章 "):
-            body_started = True
-        if not body_started:
+    layout = locate_template_layout(doc)
+    blocks = list(doc.element.body.iterchildren())
+    para_map = {paragraph._p: paragraph for paragraph in doc.paragraphs}
+    for block in blocks[layout["body_insert_idx"] :]:
+        paragraph = para_map.get(block)
+        if paragraph is None:
             continue
-
+        text = re.sub(r"\s+", " ", paragraph.text.strip())
         level = toc_level_for_heading(text)
         if level is None:
             continue
@@ -867,11 +1202,10 @@ def style_cover_and_titles(doc: Document, thesis_title: str, cover_info: dict[st
     cover_table = doc.tables[0]
     cover_title = re.sub(r"\s+", "", cover_info.get("thesis_title", thesis_title))
     cover_title_text = format_chinese_title_lines(cover_title)
-    set_cover_cell_text(
+    set_cover_title_cell_text(
         cover_table.cell(0, 1),
         cover_title_text,
         size_pt=14,
-        align=WD_ALIGN_PARAGRAPH.LEFT if "\n" in cover_title_text else WD_ALIGN_PARAGRAPH.CENTER,
     )
     fill_cover_cell_text(cover_table.cell(1, 1), "", size_pt=12)
     fill_cover_cell_text(cover_table.cell(2, 0), "", size_pt=12)
@@ -1015,12 +1349,15 @@ def set_cell_borders(cell, *, top: bool = False, bottom: bool = False) -> None:
 
 def style_table(table) -> None:
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
     rows = table.rows
     if not rows:
         return
+    set_table_column_widths(table)
 
     for r_idx, row in enumerate(rows):
         for c_idx, cell in enumerate(row.cells):
+            cell.width = Cm(_table_column_widths(len(row.cells), row)[c_idx])
             for paragraph in cell.paragraphs:
                 paragraph.alignment = (
                     WD_ALIGN_PARAGRAPH.LEFT if c_idx == 0 else WD_ALIGN_PARAGRAPH.CENTER
@@ -1034,6 +1371,76 @@ def style_table(table) -> None:
                 set_cell_borders(cell, top=True, bottom=True)
             elif r_idx == len(rows) - 1:
                 set_cell_borders(cell, bottom=True)
+
+
+def _table_column_widths(column_count: int, row=None) -> list[float]:
+    header_text = ""
+    if row is not None:
+        header_text = " ".join(cell.text.strip() for cell in row.cells)
+    if column_count == 8:
+        return [2.5, 2.0, 1.8, 1.6, 1.2, 1.2, 1.6, 1.2]
+    if column_count == 7:
+        return [4.3, 1.7, 1.8, 1.8, 1.8, 1.8, 1.8]
+    if column_count == 6:
+        return [3.4, 2.7, 2.4, 1.6, 1.8, 1.4]
+    if column_count == 5:
+        return [3.0, 3.4, 3.1, 3.0, 1.8]
+    if column_count == 4:
+        return [3.8, 3.4, 3.4, 3.4]
+    if column_count == 3:
+        if "定义" in header_text:
+            return [4.0, 2.6, 8.6]
+        if "排名" in header_text:
+            return [2.0, 6.0, 4.0]
+        return [4.0, 5.0, 5.0]
+    if column_count == 2:
+        return [6.0, 6.0]
+    return [max(1.2, 15.0 / max(column_count, 1))] * column_count
+
+
+def set_table_column_widths(table) -> None:
+    column_count = len(table.columns)
+    if column_count == 0:
+        return
+    widths_cm = _table_column_widths(column_count, table.rows[0])
+    widths_twips = [str(int(width / 2.54 * 1440)) for width in widths_cm]
+
+    tbl = table._tbl
+    tbl_pr = tbl.tblPr
+    tbl_layout = tbl_pr.find(qn("w:tblLayout"))
+    if tbl_layout is None:
+        tbl_layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(tbl_layout)
+    tbl_layout.set(qn("w:type"), "fixed")
+
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    if tbl_w is None:
+        tbl_w = OxmlElement("w:tblW")
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn("w:type"), "dxa")
+    tbl_w.set(qn("w:w"), str(sum(int(width) for width in widths_twips)))
+
+    grid = tbl.tblGrid
+    if grid is not None:
+        for grid_col in list(grid):
+            grid.remove(grid_col)
+        for width in widths_twips:
+            grid_col = OxmlElement("w:gridCol")
+            grid_col.set(qn("w:w"), width)
+            grid.append(grid_col)
+
+    for row in table.rows:
+        row_cells = row.cells
+        for c_idx, cell in enumerate(row_cells):
+            if c_idx >= len(widths_twips):
+                continue
+            tc_pr = cell._tc.get_or_add_tcPr()
+            tc_w = tc_pr.find(qn("w:tcW"))
+            if tc_w is None:
+                tc_w = OxmlElement("w:tcW")
+                tc_pr.append(tc_w)
+            tc_w.set(qn("w:type"), "dxa")
+            tc_w.set(qn("w:w"), widths_twips[c_idx])
 
 
 def postprocess_abstract_docx(path: Path) -> None:
@@ -1530,7 +1937,7 @@ def rewrite_body_footer_page_fields(docx_path: Path) -> None:
         append_text_run("页")
         append_text_run("  ", east_asia=False)
         append_text_run("共")
-        append_field("SECTIONPAGES", "1")
+        append_field(r"PAGEREF _BodyEnd \h", "71")
         append_text_run("页")
 
         etree.ElementTree(footer_root).write(str(footer_xml), encoding="utf-8", xml_declaration=True)
@@ -1660,6 +2067,19 @@ def main() -> int:
         replace_toc_with_template_fields(final_doc, toc_page_cache)
         style_toc_styles(final_doc)
         final_doc.save(OUTPUT_DOCX)
+
+        title_probe_doc = Document(OUTPUT_DOCX)
+        toc_titles = [str(entry["title"]) for entry in heading_entries_for_template_toc(title_probe_doc)]
+        pdf_toc_page_cache = build_pdf_toc_page_cache(OUTPUT_DOCX, toc_titles)
+        merged_toc_page_cache = {**toc_page_cache, **pdf_toc_page_cache}
+
+        final_doc = Document(OUTPUT_DOCX)
+        enable_update_fields(final_doc)
+        replace_toc_with_template_fields(final_doc, merged_toc_page_cache)
+        style_toc_styles(final_doc)
+        add_body_end_bookmark(final_doc)
+        final_doc.save(OUTPUT_DOCX)
+
         rewrite_body_footer_page_fields(OUTPUT_DOCX)
         rewrite_update_fields_setting(OUTPUT_DOCX)
 
