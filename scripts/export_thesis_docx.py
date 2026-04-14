@@ -820,7 +820,7 @@ def style_toc_styles(doc: Document) -> None:
                 break
         if level is None:
             continue
-        style.paragraph_format.line_spacing = Pt(14)
+        style.paragraph_format.line_spacing = 1.3
         style.paragraph_format.space_before = Pt(0)
         style.paragraph_format.space_after = Pt(0)
         style.paragraph_format.left_indent = Pt(indent_by_level[level])
@@ -1099,13 +1099,39 @@ def _append_toc_field(
     end_run.append(end)
 
 
+def _append_toc_field_begin(parent, instr: str) -> None:
+    begin_run = _append_toc_run(parent, web_hidden=True)
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    begin_run.append(begin)
+
+    instr_run = _append_toc_run(parent, web_hidden=True)
+    instr_node = OxmlElement("w:instrText")
+    instr_node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    instr_node.text = f" {instr} "
+    instr_run.append(instr_node)
+
+    sep_run = _append_toc_run(parent, web_hidden=True)
+    sep = OxmlElement("w:fldChar")
+    sep.set(qn("w:fldCharType"), "separate")
+    sep_run.append(sep)
+
+
+def _append_toc_field_end(parent) -> None:
+    end_run = _append_toc_run(parent, web_hidden=True)
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    end_run.append(end)
+
+
 def build_template_toc_paragraph(
     title: str,
     level: int,
     bookmark_name: str,
     page_result: str,
     *,
-    include_toc_field: bool = False,
+    start_toc_field: bool = False,
+    end_toc_field: bool = False,
 ):
     paragraph = OxmlElement("w:p")
     p_pr = OxmlElement("w:pPr")
@@ -1114,20 +1140,28 @@ def build_template_toc_paragraph(
     p_pr.append(p_style)
     paragraph.append(p_pr)
 
-    if include_toc_field:
-        _append_toc_field(paragraph, r'TOC \o "1-3" \h \z \u')
+    if start_toc_field:
+        _append_toc_field_begin(paragraph, r'TOC \o "1-3" \h \z \u')
 
     hyperlink = OxmlElement("w:hyperlink")
     hyperlink.set(qn("w:anchor"), bookmark_name)
     hyperlink.set(qn("w:history"), "1")
     for part in re.split(r"(\s+)", title):
         if part:
-            _append_toc_run(hyperlink, part)
+            _append_toc_run(hyperlink, part, hyperlink_style=True)
 
-    paragraph.append(hyperlink)
-    tab_run = _append_toc_run(paragraph)
+    tab_run = _append_toc_run(hyperlink, web_hidden=True)
     tab_run.append(OxmlElement("w:tab"))
-    _append_toc_run(paragraph, page_result)
+    _append_toc_field(
+        hyperlink,
+        f"PAGEREF {bookmark_name} \\h",
+        page_result,
+        result_web_hidden=True,
+    )
+    paragraph.append(hyperlink)
+
+    if end_toc_field:
+        _append_toc_field_end(paragraph)
     return paragraph
 
 
@@ -1173,7 +1207,8 @@ def replace_toc_with_template_fields(doc: Document, page_cache: dict[str, str]) 
             level=int(entry["level"]),
             bookmark_name=str(entry["bookmark"]),
             page_result=page_result,
-            include_toc_field=False,
+            start_toc_field=(offset == 0),
+            end_toc_field=(offset == len(entries) - 1),
         )
         doc.element.body.insert(layout["toc_insert_idx"] + offset, paragraph)
 
@@ -1937,7 +1972,7 @@ def rewrite_body_footer_page_fields(docx_path: Path) -> None:
         append_text_run("页")
         append_text_run("  ", east_asia=False)
         append_text_run("共")
-        append_field(r"PAGEREF _BodyEnd \h", "71")
+        append_field("SECTIONPAGES", "1")
         append_text_run("页")
 
         etree.ElementTree(footer_root).write(str(footer_xml), encoding="utf-8", xml_declaration=True)
@@ -1956,7 +1991,6 @@ def build_scaffold_doc(
 ) -> Document:
     scaffold = Document(REFERENCE_DOC)
     remove_template_shapes(scaffold)
-    style_cover_and_titles(scaffold, thesis_title, cover_info, cohort_text)
     layout = locate_template_layout(scaffold)
     style_abstract_and_toc_shell(scaffold, layout, thesis_title)
 
@@ -2068,15 +2102,6 @@ def main() -> int:
         style_toc_styles(final_doc)
         final_doc.save(OUTPUT_DOCX)
 
-        title_probe_doc = Document(OUTPUT_DOCX)
-        toc_titles = [str(entry["title"]) for entry in heading_entries_for_template_toc(title_probe_doc)]
-        pdf_toc_page_cache = build_pdf_toc_page_cache(OUTPUT_DOCX, toc_titles)
-        merged_toc_page_cache = {**toc_page_cache, **pdf_toc_page_cache}
-
-        final_doc = Document(OUTPUT_DOCX)
-        enable_update_fields(final_doc)
-        replace_toc_with_template_fields(final_doc, merged_toc_page_cache)
-        style_toc_styles(final_doc)
         add_body_end_bookmark(final_doc)
         final_doc.save(OUTPUT_DOCX)
 
