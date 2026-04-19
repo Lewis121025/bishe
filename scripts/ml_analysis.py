@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -33,7 +34,7 @@ import shap
 import xgboost as xgb
 from matplotlib import font_manager
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.inspection import PartialDependenceDisplay, partial_dependence
+from sklearn.inspection import partial_dependence
 from sklearn.linear_model import Lasso
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupKFold, GroupShuffleSplit, RandomizedSearchCV, cross_val_score
@@ -60,11 +61,24 @@ if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
 from regression_analysis import ALT_SUBSIDY_LAG_COL, build_analysis_dataset
+from ml_plot_style import (
+    build_importance_pdp_chart,
+    build_lasso_path_chart,
+    build_rank_bar_chart,
+)
 
 RANDOM_STATE = 42
 TEST_SIZE = 0.20
 CV_FOLDS = 5
 SUBSIDY_FEATURE = ALT_SUBSIDY_LAG_COL
+ADJUSTED_IMAGE_DIR = Path(ROOT_DIR) / "output" / "doc" / "adjusted_ml_images"
+
+
+def _save_adjusted_copy(source_path: str, adjusted_name: str) -> None:
+    ADJUSTED_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    source = Path(source_path)
+    target = ADJUSTED_IMAGE_DIR / adjusted_name
+    target.write_bytes(source.read_bytes())
 
 
 def _rmse(y_true, y_pred):
@@ -244,21 +258,22 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
         coef_paths.append(model.coef_)
     coef_paths = np.array(coef_paths)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for idx, name in enumerate(feature_names):
-        ax.plot(alpha_grid, coef_paths[:, idx], label=name)
-    ax.axvline(best_alpha, color="black", linestyle="--", label=f"最优α={best_alpha:.4f}")
-    ax.set_xscale("log")
-    ax.set_xlabel("正则化参数 α (log)")
-    ax.set_ylabel("Lasso 回归系数")
+    fig, ax = build_lasso_path_chart(
+        alpha_grid=alpha_grid,
+        coef_paths=coef_paths,
+        feature_names=feature_names,
+        best_alpha=best_alpha,
+    )
     ax.set_title("图4-2 Lasso系数收缩图", fontproperties=_TITLE_FONT)
-    ax.legend(fontsize=7, loc="best", ncol=2)
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig1_lasso_path.png"), bbox_inches="tight")
+    fig.tight_layout()
+    titled_path = os.path.join(output_dir, "fig1_lasso_path.png")
+    plt.savefig(titled_path, bbox_inches="tight", facecolor="white")
     ax.set_title("")
-    plt.savefig(os.path.join(BUNDLE_IMAGES_DIR, "fig1_lasso_path_notitle.png"), bbox_inches="tight")
-    plt.close()
+    fig.tight_layout()
+    notitle_path = os.path.join(BUNDLE_IMAGES_DIR, "fig1_lasso_path_notitle.png")
+    plt.savefig(notitle_path, bbox_inches="tight", facecolor="white")
+    _save_adjusted_copy(notitle_path, "figure4_3_lasso_path.png")
+    plt.close(fig)
 
     return {
         "alpha": float(best_alpha),
@@ -331,16 +346,22 @@ def random_forest_analysis(X_train, X_test, y_train, y_test, groups_train, featu
     print(f"  {SUBSIDY_FEATURE} 排名 = {subsidy_rank}")
     print(f"  {SUBSIDY_FEATURE} 重要性 = {subsidy_importance:.6f}")
 
-    fig, ax = plt.subplots(figsize=(10, 6))
     plot_df = importance_df.sort_values("随机森林重要性", ascending=True)
-    ax.barh(plot_df["变量"], plot_df["随机森林重要性"], color="steelblue")
-    ax.set_xlabel("重要性")
+    fig, ax = build_rank_bar_chart(
+        plot_df,
+        value_col="随机森林重要性",
+        xlabel="重要性",
+    )
     ax.set_title("图4-1 随机森林特征重要性图", fontproperties=_TITLE_FONT)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig2_rf_importance.png"), bbox_inches="tight")
+    fig.tight_layout()
+    titled_path = os.path.join(output_dir, "fig2_rf_importance.png")
+    plt.savefig(titled_path, bbox_inches="tight", facecolor="white")
     ax.set_title("")
-    plt.savefig(os.path.join(BUNDLE_IMAGES_DIR, "fig2_rf_importance_notitle.png"), bbox_inches="tight")
-    plt.close()
+    fig.tight_layout()
+    notitle_path = os.path.join(BUNDLE_IMAGES_DIR, "fig2_rf_importance_notitle.png")
+    plt.savefig(notitle_path, bbox_inches="tight", facecolor="white")
+    _save_adjusted_copy(notitle_path, "figure4_1_rf_importance.png")
+    plt.close(fig)
 
     return {
         "model": rf_model,
@@ -382,16 +403,22 @@ def rf_shap_analysis(rf_model, X_reference, feature_names, output_dir):
     print(f"  {SUBSIDY_FEATURE} 平均绝对SHAP值排名 = {subsidy_rank}")
     print(f"  {SUBSIDY_FEATURE} 平均绝对SHAP值 = {subsidy_importance:.6f}")
 
-    fig, ax = plt.subplots(figsize=(10, 6))
     plot_df = importance_df.sort_values("平均绝对SHAP值", ascending=True)
-    ax.barh(plot_df["变量"], plot_df["平均绝对SHAP值"], color="#9C27B0")
-    ax.set_xlabel("平均绝对SHAP值")
+    fig, ax = build_rank_bar_chart(
+        plot_df,
+        value_col="平均绝对SHAP值",
+        xlabel="平均绝对SHAP值",
+    )
     ax.set_title("图4-2 SHAP值重要性图", fontproperties=_TITLE_FONT)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig3_shap_summary.png"), bbox_inches="tight")
+    fig.tight_layout()
+    titled_path = os.path.join(output_dir, "fig3_shap_summary.png")
+    plt.savefig(titled_path, bbox_inches="tight", facecolor="white")
     ax.set_title("")
-    plt.savefig(os.path.join(BUNDLE_IMAGES_DIR, "fig3_shap_summary_notitle.png"), bbox_inches="tight")
-    plt.close()
+    fig.tight_layout()
+    notitle_path = os.path.join(BUNDLE_IMAGES_DIR, "fig3_shap_summary_notitle.png")
+    plt.savefig(notitle_path, bbox_inches="tight", facecolor="white")
+    _save_adjusted_copy(notitle_path, "figure4_2_shap_importance.png")
+    plt.close(fig)
 
     return {
         "sample_size": int(len(shap_sample)),
@@ -480,31 +507,23 @@ def xgboost_analysis(X_train, X_test, y_train, y_test, groups_train, feature_nam
     print(f"  {SUBSIDY_FEATURE} 重要性 = {subsidy_importance:.6f}")
     print(f"  {SUBSIDY_FEATURE} 部分依赖整体趋势 = {pdp_direction}")
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     plot_df = importance_df.head(10).sort_values("XGBoost重要性", ascending=True)
-    axes[0].barh(plot_df["变量"], plot_df["XGBoost重要性"], color="#4CAF50")
-    axes[0].set_title("(a) XGBoost特征重要性")
-    axes[0].set_xlabel("重要性")
-
-    PartialDependenceDisplay.from_estimator(
-        xgb_model,
-        X_train,
-        [SUBSIDY_FEATURE],
-        ax=axes[1],
-        line_kw={"color": "#FF5722", "linewidth": 2},
+    fig, axes = build_importance_pdp_chart(
+        importance_df=plot_df,
+        importance_col="XGBoost重要性",
+        pdp_df=pdp_df,
+        subsidy_feature=SUBSIDY_FEATURE,
     )
-    axes[1].set_title("(b) 财政补贴部分依赖图")
-    axes[1].set_xlabel(SUBSIDY_FEATURE)
-    axes[1].set_ylabel("预测的 Overpay")
-
-    plt.suptitle("图4-3 XGBoost特征重要性与财政补贴部分依赖图", fontproperties=_TITLE_FONT, y=1.02)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "fig4_shap_subsidy.png"), bbox_inches="tight")
-    axes[0].set_title("")
-    axes[1].set_title("")
+    plt.suptitle("图4-4 XGBoost特征重要性与财政补贴部分依赖图", fontproperties=_TITLE_FONT, y=1.02)
+    fig.tight_layout()
+    titled_path = os.path.join(output_dir, "fig4_shap_subsidy.png")
+    plt.savefig(titled_path, bbox_inches="tight", facecolor="white")
     plt.suptitle("")
-    plt.savefig(os.path.join(BUNDLE_IMAGES_DIR, "fig4_shap_subsidy_notitle.png"), bbox_inches="tight")
-    plt.close()
+    fig.tight_layout()
+    notitle_path = os.path.join(BUNDLE_IMAGES_DIR, "fig4_shap_subsidy_notitle.png")
+    plt.savefig(notitle_path, bbox_inches="tight", facecolor="white")
+    _save_adjusted_copy(notitle_path, "figure4_4_xgb_importance_pdp.png")
+    plt.close(fig)
 
     return {
         "test_metrics": metrics,
