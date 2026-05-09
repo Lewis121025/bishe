@@ -14,7 +14,6 @@ import json
 import os
 import sys
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -22,7 +21,6 @@ import pandas as pd
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
 RESULTS_DIR = os.path.join(ROOT_DIR, "results")
-BUNDLE_IMAGES_DIR = os.path.join(ROOT_DIR, "thesis_final_bundle", "images")
 
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(RESULTS_DIR, ".matplotlib"))
 
@@ -71,14 +69,6 @@ RANDOM_STATE = 42
 TEST_SIZE = 0.20
 CV_FOLDS = 5
 SUBSIDY_FEATURE = ALT_SUBSIDY_LAG_COL
-ADJUSTED_IMAGE_DIR = Path(ROOT_DIR) / "output" / "doc" / "adjusted_ml_images"
-
-
-def _save_adjusted_copy(source_path: str, adjusted_name: str) -> None:
-    ADJUSTED_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    source = Path(source_path)
-    target = ADJUSTED_IMAGE_DIR / adjusted_name
-    target.write_bytes(source.read_bytes())
 
 
 def _rmse(y_true, y_pred):
@@ -268,11 +258,6 @@ def lasso_analysis(X_train, X_test, y_train, y_test, groups_train, feature_names
     fig.tight_layout()
     titled_path = os.path.join(output_dir, "fig1_lasso_path.png")
     plt.savefig(titled_path, bbox_inches="tight", facecolor="white")
-    ax.set_title("")
-    fig.tight_layout()
-    notitle_path = os.path.join(BUNDLE_IMAGES_DIR, "fig1_lasso_path_notitle.png")
-    plt.savefig(notitle_path, bbox_inches="tight", facecolor="white")
-    _save_adjusted_copy(notitle_path, "figure4_3_lasso_path.png")
     plt.close(fig)
 
     return {
@@ -356,11 +341,6 @@ def random_forest_analysis(X_train, X_test, y_train, y_test, groups_train, featu
     fig.tight_layout()
     titled_path = os.path.join(output_dir, "fig2_rf_importance.png")
     plt.savefig(titled_path, bbox_inches="tight", facecolor="white")
-    ax.set_title("")
-    fig.tight_layout()
-    notitle_path = os.path.join(BUNDLE_IMAGES_DIR, "fig2_rf_importance_notitle.png")
-    plt.savefig(notitle_path, bbox_inches="tight", facecolor="white")
-    _save_adjusted_copy(notitle_path, "figure4_1_rf_importance.png")
     plt.close(fig)
 
     return {
@@ -413,11 +393,6 @@ def rf_shap_analysis(rf_model, X_reference, feature_names, output_dir):
     fig.tight_layout()
     titled_path = os.path.join(output_dir, "fig3_shap_summary.png")
     plt.savefig(titled_path, bbox_inches="tight", facecolor="white")
-    ax.set_title("")
-    fig.tight_layout()
-    notitle_path = os.path.join(BUNDLE_IMAGES_DIR, "fig3_shap_summary_notitle.png")
-    plt.savefig(notitle_path, bbox_inches="tight", facecolor="white")
-    _save_adjusted_copy(notitle_path, "figure4_2_shap_importance.png")
     plt.close(fig)
 
     return {
@@ -518,11 +493,6 @@ def xgboost_analysis(X_train, X_test, y_train, y_test, groups_train, feature_nam
     fig.tight_layout()
     titled_path = os.path.join(output_dir, "fig4_shap_subsidy.png")
     plt.savefig(titled_path, bbox_inches="tight", facecolor="white")
-    plt.suptitle("")
-    fig.tight_layout()
-    notitle_path = os.path.join(BUNDLE_IMAGES_DIR, "fig4_shap_subsidy_notitle.png")
-    plt.savefig(notitle_path, bbox_inches="tight", facecolor="white")
-    _save_adjusted_copy(notitle_path, "figure4_4_xgb_importance_pdp.png")
     plt.close(fig)
 
     return {
@@ -629,7 +599,6 @@ def main():
     data_dir = os.path.join(ROOT_DIR, "processed_data")
     output_dir = os.path.join(ROOT_DIR, "results")
     os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(BUNDLE_IMAGES_DIR, exist_ok=True)
 
     print("加载数据...")
     df, _ = build_analysis_dataset(data_dir)

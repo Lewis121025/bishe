@@ -1,12 +1,20 @@
 # Python cache
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 venv/
+.venv/
 *.swp
 
 # macOS
 .DS_Store
 
+# Generated experiment artifacts
+processed_data/
+results/
+
 # Local tooling
 .claude/
-results/.matplotlib/
